@@ -94,6 +94,8 @@ button, select, input { font: inherit; touch-action: manipulation; }
     <div class="field"><label for="whiteMode">White and grey play as</label>
       <select id="whiteMode"><option value="chord">Soft chord (red + green + blue)</option><option value="noise">Noise across the color range</option><option value="off">Silence</option></select>
       <span class="hint">White light is every color at once. Its sound gets louder with how much white is in view, and black (no light) is always silent.</span></div>
+    <label class="check"><input type="checkbox" id="adaptToggle" checked> <span>Adjust for room lighting<br><span class="hint">Like the eye, treats a tint shared by the near-grey surfaces in view as the color of the light, so white walls under warm bulbs don't read as orange.</span></span></label>
+    <label class="check"><input type="checkbox" id="vividToggle" checked> <span>Let vivid colors dominate<br><span class="hint">Strong colors count far more than dull ones (beige, wood, skin), closer to what catches the eye.</span></span></label>
     <label class="check"><input type="checkbox" id="snapToggle"> <span>Snap tones to chromatic notes<br><span class="hint">Groups colors by their nearest musical note.</span></span></label>
     <label class="check"><input type="checkbox" id="noteToggle"> Show note names around the wheel</label>
   </div>
@@ -107,6 +109,7 @@ const video = $('video'), statusMessage = $('statusMessage');
 const cameraButton = $('cameraButton'), playButton = $('playButton'), flipButton = $('flipButton');
 const noteToggle = $('noteToggle'), snapToggle = $('snapToggle'), octaveShift = $('octaveShift'), volumeControl = $('volumeControl');
 const spreadSelect = $('spreadSelect'), toneSelect = $('toneSelect'), playMode = $('playMode'), whiteMode = $('whiteMode');
+const adaptToggle = $('adaptToggle'), vividToggle = $('vividToggle');
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 const setStatus = (m) => { statusMessage.textContent = m || ''; };
 const press = (btn, on) => btn.setAttribute('aria-pressed', String(on));
@@ -131,6 +134,7 @@ const wheel = $('wheel'), wheelCtx = wheel.getContext('2d');
 let pixelBin = new Int16Array(0), selectedBin = -1, wheelGeom = null;
 const binRGB = new Float32Array(NUM_BINS * 3), hasRGB = new Uint8Array(NUM_BINS); // smoothed average real colour per bin
 let colorLevel = 0, whiteLevel = 0, blackLevel = 0;   // smoothed scene make-up; colorLevel also sets colour loudness
+let wb = [1, 1, 1];                                   // smoothed per-channel gains that cancel the light's tint
 let sonifyAudioContext, isSonifying = false, voices = {}, peakFreqs = new Array(8).fill(0), brightWave;
 let masterGain, noiseGain, noiseFilters = [], noiseBoost = 1;
 
@@ -219,29 +223,48 @@ const BIN_PARTS = Array.from({ length: NUM_BINS }, (_, i) => {
 function analyzeColors(data) {
   const hist = new Float32Array(NUM_BINS), rgb = new Float32Array(NUM_BINS * 3), n = data.length / 4;
   if (pixelBin.length !== n) pixelBin = new Int16Array(n);
-  let total = 0, white = 0, black = 0;
+  let total = 0, histTotal = 0, white = 0, black = 0;
+  let nr = 0, ng = 0, nb = 0, nn = 0;             // lit, near-grey pixels: the best clue to the light's own tint
+  const adapt = adaptToggle.checked, vivid = vividToggle.checked;
   const add = (bin, w, r, g, b) => { hist[bin] += w; rgb[bin * 3] += w * r; rgb[bin * 3 + 1] += w * g; rgb[bin * 3 + 2] += w * b; };
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    const r = data[i], g = data[i + 1], b = data[i + 2];
+    let r = data[i], g = data[i + 1], b = data[i + 2];
+    const rawMax = Math.max(r, g, b);
+    if (rawMax > 50 && rawMax - Math.min(r, g, b) < 0.4 * rawMax) { nr += r; ng += g; nb += b; nn++; }
+    if (adapt) { r = Math.min(255, r * wb[0]); g = Math.min(255, g * wb[1]); b = Math.min(255, b * wb[2]); }
     const max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min;
     black += 1 - max / 255;
     if (delta < MIN_CHROMA) { white += max / 255; pixelBin[p] = -1; continue; }   // too little colour for a reliable hue: count it as grey
     white += min / 255;
     let hue = max === r ? 60 * ((g - b) / delta) : max === g ? 60 * (2 + (b - r) / delta) : 60 * (4 + (r - g) / delta);
     hue = (hue + 360) % 360;
-    const w = (delta - MIN_CHROMA) / (255 - MIN_CHROMA);   // chroma above the noise floor: how much coloured light the pixel carries
+    const chroma = (delta - MIN_CHROMA) / (255 - MIN_CHROMA);   // chroma above the noise floor: how much coloured light the pixel carries
+    const w = vivid ? chroma * chroma : chroma;                 // squaring lets strong colours outweigh dull ones
     // Soft binning around the circle: share weight between the two nearest bins so the wheel is smooth, not spiky.
     const pos = hue / BIN_DEG - 0.5, i0 = Math.floor(pos), f = pos - i0;
     add(wrapBin(i0), w * (1 - f), r, g, b);
     add(wrapBin(i0 + 1), w * f, r, g, b);
     pixelBin[p] = wrapBin(Math.round(pos));
-    total += w;
+    total += chroma;
+    histTotal += w;
   }
   for (let i = 0; i < NUM_BINS; i++) {
     if (hist[i] > 0) for (let c = 0; c < 3; c++) rgb[i * 3 + c] /= hist[i];
-    if (total > 0) hist[i] = 100 * hist[i] / total;
+    if (histTotal > 0) hist[i] = 100 * hist[i] / histTotal;
   }
+  updateWhiteBalance(nr, ng, nb, nn, n);
   return { hist, rgb, vivid: n ? total / n : 0, white: n ? white / n : 0, black: n ? black / n : 0 };
+}
+// Colour constancy: if enough of the view is near-grey, assume those surfaces are really grey under tinted light
+// and find gains that make their average neutral. Partial and clamped, so genuinely coloured scenes survive.
+// Gains are smoothed and applied from the next frame on.
+function updateWhiteBalance(nr, ng, nb, nn, n) {
+  let target = [1, 1, 1];
+  if (nn > n * 0.1) {
+    const m = [nr / nn, ng / nn, nb / nn], avg = (m[0] + m[1] + m[2]) / 3;
+    target = m.map((c) => Math.min(1.7, Math.max(0.6, 1 + (avg / Math.max(1, c) - 1) * 0.85)));
+  }
+  wb = wb.map((g, c) => g + (target[c] - g) * 0.1);
 }
 
 // Pick what to play. Main colors: up to 4 wheel peaks. Full spectrum: every bin with a meaningful share.
@@ -395,6 +418,7 @@ function stopCamera() {
   smooth.fill(0);
   hasRGB.fill(0);
   whiteLevel = blackLevel = 0;
+  wb = [1, 1, 1];
   selectedBin = -1;
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   press(cameraButton, false);
