@@ -20,12 +20,15 @@ button, select, input { font: inherit; touch-action: manipulation; }
 
 .video-wrap { position: sticky; top: env(safe-area-inset-top); z-index: 5; margin-bottom: 10px; border-radius: 12px; overflow: hidden; background: #000; box-shadow: 0 6px 16px rgba(0,0,0,.5); }
 #video { display: block; width: 100%; height: min(30vh, 260px); object-fit: cover; }
-#video.mirror { transform: scaleX(-1); }
+#video.mirror, .overlay.mirror { transform: scaleX(-1); }
+.overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .flip { position: absolute; right: 8px; bottom: 8px; min-height: 44px; padding: 0 14px; border-radius: 22px; border: 0; background: rgba(0,0,0,.6); color: #fff; }
 
 .card { background: #181b21; border: 1px solid #262b34; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
 .card h2 { font-size: .98rem; font-weight: 600; margin: 0 0 8px; }
 .chart-box { position: relative; height: 200px; }
+.chart-box canvas { cursor: pointer; }
+.chart-note { margin: -2px 0 8px; min-height: 1.3em; color: #8791a1; font-size: .82rem; line-height: 1.4; }
 .mic-grid { display: grid; grid-template-columns: minmax(0,1fr) auto; grid-template-rows: auto 1fr; gap: 4px 8px; }
 .note-row { grid-column: 1; grid-row: 1; position: relative; height: 28px; }
 .mic-canvas { grid-column: 1; grid-row: 2; position: relative; height: 260px; }
@@ -64,10 +67,12 @@ button, select, input { font: inherit; touch-action: manipulation; }
   <section id="cameraCharts" hidden>
     <div class="video-wrap">
       <video id="video" autoplay muted playsinline></video>
+      <canvas id="videoOverlay" class="overlay" aria-hidden="true"></canvas>
       <button id="flipButton" class="flip" type="button">Flip camera</button>
     </div>
     <div class="card">
-      <h2>Estimated color distribution</h2>
+      <h2>Color distribution (approximate wavelength)</h2>
+      <p id="colorNote" class="chart-note" aria-live="off"></p>
       <div class="chart-box"><canvas id="wavelengthHistogram"></canvas></div>
     </div>
     <div class="card">
@@ -125,7 +130,8 @@ const AudioCtx = window.AudioContext || window.webkitAudioContext;
 const setStatus = (m) => { statusMessage.textContent = m || ''; };
 const press = (btn, on) => btn.setAttribute('aria-pressed', String(on));
 
-const NUM_BINS = 64, MIN_NM = 400, MAX_NM = 700, ANALYSIS_W = 64;
+// The hue table below only reaches 425-660 nm, so the axis is fitted to that span.
+const NUM_BINS = 64, MIN_NM = 420, MAX_NM = 665, ANALYSIS_W = 96;
 const MIC_MIN_DB = -100, MIC_MAX_DB = -40;
 // HSV hue (degrees) -> approximate spectral wavelength (nm); far closer to perception than a straight line.
 const HUE_NM = [[0,660],[30,615],[60,580],[120,532],[180,495],[240,465],[270,425]];
@@ -139,6 +145,10 @@ let lastCamTime = 0, lastMicTime = 0;
 const micNoteElements = {};
 const videoCanvas = document.createElement('canvas');
 const videoCtx = videoCanvas.getContext('2d', { willReadFrequently: true });
+const overlay = $('videoOverlay'), overlayCtx = overlay.getContext('2d'), colorNote = $('colorNote');
+const maskCanvas = document.createElement('canvas'), maskCtx = maskCanvas.getContext('2d');
+let pixelBin = new Int16Array(0), skippedShare = 0, selectedBin = -1;
+const binRGB = new Float32Array(NUM_BINS * 3), hasRGB = new Uint8Array(NUM_BINS); // smoothed average real colour per bin
 let sonifyAudioContext, isSonifying = false, activeOscillators = {};
 
 /* ---------- helpers ---------- */
@@ -201,15 +211,18 @@ function hueToNm(h) {
   return HUE_NM[HUE_NM.length - 1][1];
 }
 
+// Returns the normalised histogram, the average pixel colour per bin, and the share of pixels skipped.
+// Also records each pixel's nearest bin in pixelBin (-1 = skipped) for the camera highlight.
 function analyzeColors(data) {
-  const hist = new Float32Array(NUM_BINS);
-  let total = 0;
-  for (let i = 0; i < data.length; i += 4) {
+  const hist = new Float32Array(NUM_BINS), rgb = new Float32Array(NUM_BINS * 3), n = data.length / 4;
+  if (pixelBin.length !== n) pixelBin = new Int16Array(n);
+  let total = 0, skipped = 0;
+  const add = (bin, w, r, g, b) => { hist[bin] += w; rgb[bin * 3] += w * r; rgb[bin * 3 + 1] += w * g; rgb[bin * 3 + 2] += w * b; };
+  for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
     const max = Math.max(r, g, b), delta = max - Math.min(r, g, b);
-    if (max < 35) continue;
-    const sat = delta / max;
-    if (sat < 0.18) continue;                       // near-grey pixels carry no usable hue
+    const sat = max ? delta / max : 0;
+    if (max < 35 || sat < 0.18) { pixelBin[p] = -1; skipped++; continue; }   // dark or near-grey pixels carry no usable hue
     let hue = max === r ? 60 * ((g - b) / delta) : max === g ? 60 * (2 + (b - r) / delta) : 60 * (4 + (r - g) / delta);
     hue = (hue + 360) % 360;
     let w = sat * (0.35 + 0.65 * max / 255), nm;
@@ -221,12 +234,16 @@ function analyzeColors(data) {
     // Soft binning: share weight between the two nearest bins so the plot is smooth, not spiky.
     const pos = Math.min(NUM_BINS - 1, Math.max(0, ((nm - MIN_NM) / (MAX_NM - MIN_NM)) * NUM_BINS - 0.5));
     const i0 = Math.floor(pos), f = pos - i0;
-    hist[i0] += w * (1 - f);
-    if (i0 + 1 < NUM_BINS) hist[i0 + 1] += w * f; else hist[i0] += w * f;
+    add(i0, w * (1 - f), r, g, b);
+    add(i0 + 1 < NUM_BINS ? i0 + 1 : i0, w * f, r, g, b);
+    pixelBin[p] = Math.round(pos);
     total += w;
   }
-  if (total > 0) for (let i = 0; i < NUM_BINS; i++) hist[i] = 100 * hist[i] / total;
-  return hist;
+  for (let i = 0; i < NUM_BINS; i++) {
+    if (hist[i] > 0) for (let c = 0; c < 3; c++) rgb[i * 3 + c] /= hist[i];
+    if (total > 0) hist[i] = 100 * hist[i] / total;
+  }
+  return { hist, rgb, skipped: n ? skipped / n : 0 };
 }
 
 // Pick what to play: top local peaks, or (snap mode) bins grouped by nearest chromatic note.
@@ -247,11 +264,24 @@ function getTones(h) {
 }
 
 function processVideoFrame() {
-  const w = ANALYSIS_W, h = Math.max(1, Math.round(w * video.videoHeight / video.videoWidth));
+  // Match object-fit: cover, so only the part of the frame shown in the preview is analysed.
+  const vw = video.videoWidth, vh = video.videoHeight, ew = video.clientWidth || vw, eh = video.clientHeight || vh;
+  const s = Math.max(ew / vw, eh / vh), sw = ew / s, sh = eh / s;
+  const w = ANALYSIS_W, h = Math.max(1, Math.round(w * eh / ew));
   if (videoCanvas.width !== w || videoCanvas.height !== h) { videoCanvas.width = w; videoCanvas.height = h; }
-  videoCtx.drawImage(video, 0, 0, w, h);
-  const raw = analyzeColors(videoCtx.getImageData(0, 0, w, h).data);
-  for (let i = 0; i < NUM_BINS; i++) smooth[i] += (raw[i] - smooth[i]) * 0.4;   // temporal smoothing
+  videoCtx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, w, h);
+  const { hist: raw, rgb, skipped } = analyzeColors(videoCtx.getImageData(0, 0, w, h).data);
+  for (let i = 0; i < NUM_BINS; i++) {
+    smooth[i] += (raw[i] - smooth[i]) * 0.4;                                   // temporal smoothing
+    if (raw[i] > 0.3) {
+      const k = hasRGB[i] ? 0.3 : 1;
+      for (let c = 0; c < 3; c++) binRGB[i * 3 + c] += (rgb[i * 3 + c] - binRGB[i * 3 + c]) * k;
+      hasRGB[i] = 1;
+    }
+  }
+  skippedShare += (skipped - skippedShare) * 0.2;
+  drawHighlight(w, h);
+  updateColorNote();
 
   const tones = getTones(smooth);
   activeBins = new Set();
@@ -270,6 +300,32 @@ function processVideoFrame() {
   if (isSonifying) updateSonification(tones);
 }
 
+// Dims everything except pixels within one bin of the tapped bar.
+function drawHighlight(w, h) {
+  const ew = overlay.clientWidth, eh = overlay.clientHeight;
+  if (overlay.width !== ew || overlay.height !== eh) { overlay.width = ew; overlay.height = eh; }
+  overlayCtx.clearRect(0, 0, ew, eh);
+  if (selectedBin < 0 || !ew || !eh) return;
+  if (maskCanvas.width !== w || maskCanvas.height !== h) { maskCanvas.width = w; maskCanvas.height = h; }
+  const img = maskCtx.createImageData(w, h), d = img.data;
+  for (let p = 0; p < pixelBin.length; p++) {
+    const b = pixelBin[p];
+    d[p * 4 + 3] = b >= 0 && Math.abs(b - selectedBin) <= 1 ? 0 : 180;
+  }
+  maskCtx.putImageData(img, 0, 0);
+  overlayCtx.imageSmoothingEnabled = true;
+  overlayCtx.drawImage(maskCanvas, 0, 0, ew, eh);
+}
+function updateColorNote() {
+  const msg = 'Not counted: ' + Math.round(skippedShare * 100) + '% grey, white or dark. ' +
+    (selectedBin < 0 ? 'Tap a bar to highlight those colors on the camera.' : 'Highlighting ~' + Math.round(binWavelength(selectedBin)) + ' nm. Tap it again to clear.');
+  if (colorNote.textContent !== msg) colorNote.textContent = msg;
+}
+function selectBin(i) {
+  selectedBin = i;
+  if (isCameraOn && video.readyState >= 2) processVideoFrame();
+}
+
 async function openCameraStream() {
   const next = await navigator.mediaDevices.getUserMedia({
     video: { facingMode: { ideal: facing }, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
@@ -277,7 +333,9 @@ async function openCameraStream() {
   cameraStream = next;
   video.srcObject = next;
   const s = next.getVideoTracks()[0]?.getSettings?.() || {};
-  video.classList.toggle('mirror', (s.facingMode || facing) !== 'environment');
+  const mirror = (s.facingMode || facing) !== 'environment';
+  video.classList.toggle('mirror', mirror);
+  overlay.classList.toggle('mirror', mirror);
   try { await video.play(); } catch (e) { /* may need another gesture */ }
   prev?.getTracks().forEach((t) => t.stop());
 }
@@ -302,6 +360,10 @@ function stopCamera() {
   if (isSonifying) stopSonification();
   isCameraOn = false;
   smooth.fill(0);
+  hasRGB.fill(0);
+  skippedShare = 0;
+  selectedBin = -1;
+  overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   press(cameraButton, false);
 }
 async function flipCamera() {
@@ -470,26 +532,37 @@ function updateSonification(tones) {
 }
 
 /* ---------- charts ---------- */
-const binColors = Array.from({ length: NUM_BINS }, (_, i) => {
-  // Colour each bar with the hue that actually maps to its wavelength (inverse of hueToNm).
+const binHues = Array.from({ length: NUM_BINS }, (_, i) => {
+  // Fallback bar colour: the hue that maps to each bin's wavelength (inverse of hueToNm).
   const nm = binWavelength(i);
   let hue = 270;
   for (let k = 1; k < HUE_NM.length; k++) {
     if (nm >= HUE_NM[k][1]) { const [h0, n0] = HUE_NM[k - 1], [h1, n1] = HUE_NM[k]; hue = h0 + (h1 - h0) * (nm - n0) / (n1 - n0); break; }
   }
-  return `hsl(${hue}, 85%, 52%)`;
+  return hue;
 });
+// Bars show the average real colour of their pixels, lifted so dark colours stay visible on the dark page.
+function barColor(i, a) {
+  if (!hasRGB[i]) return `hsla(${binHues[i]}, 85%, 52%, ${a})`;
+  const r = binRGB[i * 3], g = binRGB[i * 3 + 1], b = binRGB[i * 3 + 2];
+  const lift = Math.max(1, 150 / Math.max(1, r, g, b)), ch = (v) => Math.min(255, Math.round(v * lift));
+  return `rgba(${ch(r)}, ${ch(g)}, ${ch(b)}, ${a})`;
+}
 
 function makeBarChart(canvas, yTitle) {
   return new Chart(canvas, {
     type: 'bar',
-    data: { labels: [], datasets: [{ data: new Array(NUM_BINS).fill(0), backgroundColor: [...binColors], barPercentage: 1, categoryPercentage: 1 }] },
+    data: { labels: [], datasets: [{ data: new Array(NUM_BINS).fill(0), backgroundColor: binHues.map((_, i) => barColor(i, 1)), barPercentage: 1, categoryPercentage: 1 }] },
     options: {
       animation: false, responsive: true, maintainAspectRatio: false,
+      onClick: (e, _els, chart) => {
+        const hit = chart.getElementsAtEventForMode(e.native, 'index', { intersect: false }, false)[0];
+        selectBin(hit && hit.index !== selectedBin ? hit.index : -1);
+      },
       plugins: { legend: { display: false }, tooltip: { enabled: false } },
       scales: {
         x: { grid: { display: false }, ticks: { autoSkip: true, maxTicksLimit: 8, maxRotation: 0, minRotation: 0 } },
-        y: { min: 0, max: 10, ticks: { maxTicksLimit: 5, callback: (v) => v + '%' }, title: { display: true, text: yTitle } }
+        y: { min: 0, max: 10, ticks: { maxTicksLimit: 5, callback: (v) => Math.round(v) + '%' }, title: { display: true, text: yTitle } }
       }
     }
   });
@@ -506,7 +579,10 @@ function initCharts() {
 function updateBars(chart, active) {
   chart.data.datasets[0].data = Array.from(smooth);
   chart.options.scales.y.max = yMax;
-  if (active) chart.data.datasets[0].backgroundColor = binColors.map((c, i) => (active.has(i) ? '#ffd24a' : c));
+  chart.data.datasets[0].backgroundColor = binHues.map((_, i) => {
+    const a = selectedBin < 0 || Math.abs(i - selectedBin) <= 1 ? 1 : 0.3;   // fade bars outside the selection
+    return active && active.has(i) ? `rgba(255, 210, 74, ${a})` : barColor(i, a);
+  });
 }
 function refreshHzLabels(force) {
   const showNotes = noteToggle.checked, snap = snapToggle.checked;
