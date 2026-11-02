@@ -28,7 +28,7 @@ button, select, input { font: inherit; touch-action: manipulation; }
 .card h2 { font-size: .98rem; font-weight: 600; margin: 0 0 8px; }
 .chart-box { position: relative; height: 200px; }
 .chart-box canvas { cursor: pointer; }
-.chart-note { margin: -2px 0 8px; min-height: 1.3em; color: #8791a1; font-size: .82rem; line-height: 1.4; }
+.chart-note { margin: -2px 0 8px; min-height: 1.3em; white-space: pre-line; color: #8791a1; font-size: .82rem; line-height: 1.4; }
 .mic-grid { display: grid; grid-template-columns: minmax(0,1fr) auto; grid-template-rows: auto 1fr; gap: 4px 8px; }
 .note-row { grid-column: 1; grid-row: 1; position: relative; height: 28px; }
 .mic-canvas { grid-column: 1; grid-row: 2; position: relative; height: 260px; }
@@ -104,15 +104,21 @@ button, select, input { font: inherit; touch-action: manipulation; }
 <div id="sheet" class="sheet" hidden>
   <div class="sheet-panel" role="dialog" aria-label="Settings">
     <div class="sheet-head"><h2>Settings</h2><button id="closeSheet" type="button">Done</button></div>
-    <label class="check"><input type="checkbox" id="snapToggle"> <span>Snap tones to chromatic notes<br><span class="hint">Groups colors by nearest note and plays the most common ones.</span></span></label>
-    <label class="check"><input type="checkbox" id="noteToggle"> Show note names on chart</label>
     <div class="field"><label for="volumeControl">Volume: <span id="volumeValue">70</span>%</label>
       <input type="range" id="volumeControl" min="0" max="1" value="0.7" step="0.01"></div>
-    <div class="field"><label for="scaleSelect">Pitch style</label>
-      <select id="scaleSelect"><option value="log">True to light</option><option value="exponential">Musical</option><option value="linear">Even steps</option></select>
-      <span id="scaleHint" class="hint"></span></div>
-    <div class="field"><label for="octaveShift">Pitch shift: <span id="octaveValue">0</span> (octaves, negative = lower)</label>
-      <input type="range" id="octaveShift" min="-2" max="2" value="0" step="1"></div>
+    <div class="field"><label for="octaveShift">Octaves below light: <span id="octaveValue">40</span></label>
+      <input type="range" id="octaveShift" min="37" max="43" value="40" step="1">
+      <span id="rangeHint" class="hint"></span></div>
+    <div class="field"><label for="spreadSelect">Spread</label>
+      <select id="spreadSelect"><option value="1">1× (true ratios)</option><option value="2">2× (wider)</option><option value="4">4× (much wider)</option></select>
+      <span class="hint">Visible light spans less than one octave, so at 1× the colors sound close together. Wider spreads separate them more clearly, but aren't physically accurate.</span></div>
+    <div class="field"><label for="toneSelect">Tone</label>
+      <select id="toneSelect"><option value="sine">Pure (sine wave, like a single wavelength of light)</option><option value="triangle">Bright (carries better on phone speakers)</option></select></div>
+    <div class="field"><label for="playMode">What plays</label>
+      <select id="playMode"><option value="peaks">Main colors (up to 4 tones)</option><option value="spectrum">Full spectrum (every color present)</option></select></div>
+    <label class="check"><input type="checkbox" id="noiseToggle"> <span>Play white and grey as noise<br><span class="hint">White light contains every color at once, so it plays as a soft band of noise across the color range.</span></span></label>
+    <label class="check"><input type="checkbox" id="snapToggle"> <span>Snap tones to chromatic notes<br><span class="hint">Groups colors by their nearest musical note.</span></span></label>
+    <label class="check"><input type="checkbox" id="noteToggle"> Show note names on chart</label>
     <div class="field"><label for="micGainControl">Mic gain: <span id="micGainValue">1.0x</span></label>
       <input type="range" id="micGainControl" min="0" max="10" value="1" step="0.1"></div>
   </div>
@@ -125,7 +131,8 @@ const $ = (id) => document.getElementById(id);
 const video = $('video'), statusMessage = $('statusMessage');
 const cameraButton = $('cameraButton'), micButton = $('micButton'), playButton = $('playButton'), flipButton = $('flipButton');
 const noteToggle = $('noteToggle'), snapToggle = $('snapToggle'), octaveShift = $('octaveShift'), volumeControl = $('volumeControl');
-const scaleSelect = $('scaleSelect'), micGainControl = $('micGainControl'), micNoteLabels = $('micNoteLabels');
+const spreadSelect = $('spreadSelect'), toneSelect = $('toneSelect'), playMode = $('playMode'), noiseToggle = $('noiseToggle');
+const micGainControl = $('micGainControl'), micNoteLabels = $('micNoteLabels');
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 const setStatus = (m) => { statusMessage.textContent = m || ''; };
 const press = (btn, on) => btn.setAttribute('aria-pressed', String(on));
@@ -149,7 +156,9 @@ const overlay = $('videoOverlay'), overlayCtx = overlay.getContext('2d'), colorN
 const maskCanvas = document.createElement('canvas'), maskCtx = maskCanvas.getContext('2d');
 let pixelBin = new Int16Array(0), skippedShare = 0, selectedBin = -1;
 const binRGB = new Float32Array(NUM_BINS * 3), hasRGB = new Uint8Array(NUM_BINS); // smoothed average real colour per bin
-let sonifyAudioContext, isSonifying = false, activeOscillators = {};
+let colorLevel = 0, greyLevel = 0;   // smoothed scene loudness for colours and for white/grey
+let sonifyAudioContext, isSonifying = false, voices = {}, peakFreqs = [0, 0, 0, 0];
+let masterGain, noiseGain, noiseFilters = [], noiseBoost = 1;
 
 /* ---------- helpers ---------- */
 function topPeaks(arr, n, minVal, radius = 1) {
@@ -172,13 +181,14 @@ const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
 const midiName = (m) => NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
 const frequencyToNote = (f) => (f > 0 ? midiName(freqToMidi(f)) : '-');
 
+const LIGHT_MPS = 299792458, SOUND_MPS = 343;
+const lightThz = (nm) => LIGHT_MPS / nm / 1e3;
+// Light's own frequency dropped N octaves. Spread > 1 widens intervals around the range's centre (not physical).
 function wavelengthToAudibleFreq(nm) {
-  const octave = parseFloat(octaveShift.value), p = (MAX_NM - nm) / (MAX_NM - MIN_NM); // 0 = red, 1 = violet
-  let f;
-  if (scaleSelect.value === 'linear') f = (200 + p * 1000) * Math.pow(2, octave);
-  else if (scaleSelect.value === 'exponential') f = midiToFreq(48 + p * 48) * Math.pow(2, octave);
-  else f = (299792458 / (nm * 1e-9) / Math.pow(2, 40)) * Math.pow(2, octave); // light shifted down 40 octaves (~390-680 Hz)
-  return Math.min(12000, Math.max(20, f));
+  const drop = Math.pow(2, parseFloat(octaveShift.value)), spread = parseFloat(spreadSelect.value);
+  const f = LIGHT_MPS / (nm * 1e-9) / drop;
+  const fc = LIGHT_MPS / (Math.sqrt(MIN_NM * MAX_NM) * 1e-9) / drop;
+  return Math.min(12000, Math.max(20, fc * Math.pow(f / fc, spread)));
 }
 const binFreq = (i) => wavelengthToAudibleFreq(binWavelength(i));
 
@@ -211,18 +221,23 @@ function hueToNm(h) {
   return HUE_NM[HUE_NM.length - 1][1];
 }
 
-// Returns the normalised histogram, the average pixel colour per bin, and the share of pixels skipped.
+// Returns the normalised histogram, the average pixel colour per bin, the share of pixels skipped,
+// how vivid the scene is (mean colour weight, 0-1) and how much lit white/grey it holds (mean brightness, 0-1).
 // Also records each pixel's nearest bin in pixelBin (-1 = skipped) for the camera highlight.
 function analyzeColors(data) {
   const hist = new Float32Array(NUM_BINS), rgb = new Float32Array(NUM_BINS * 3), n = data.length / 4;
   if (pixelBin.length !== n) pixelBin = new Int16Array(n);
-  let total = 0, skipped = 0;
+  let total = 0, skipped = 0, grey = 0;
   const add = (bin, w, r, g, b) => { hist[bin] += w; rgb[bin * 3] += w * r; rgb[bin * 3 + 1] += w * g; rgb[bin * 3 + 2] += w * b; };
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
     const max = Math.max(r, g, b), delta = max - Math.min(r, g, b);
     const sat = max ? delta / max : 0;
-    if (max < 35 || sat < 0.18) { pixelBin[p] = -1; skipped++; continue; }   // dark or near-grey pixels carry no usable hue
+    if (max < 35 || sat < 0.18) {                   // dark or near-grey pixels carry no usable hue
+      pixelBin[p] = -1; skipped++;
+      if (max >= 35) grey += max / 255;
+      continue;
+    }
     let hue = max === r ? 60 * ((g - b) / delta) : max === g ? 60 * (2 + (b - r) / delta) : 60 * (4 + (r - g) / delta);
     hue = (hue + 360) % 360;
     let w = sat * (0.35 + 0.65 * max / 255), nm;
@@ -243,12 +258,13 @@ function analyzeColors(data) {
     if (hist[i] > 0) for (let c = 0; c < 3; c++) rgb[i * 3 + c] /= hist[i];
     if (total > 0) hist[i] = 100 * hist[i] / total;
   }
-  return { hist, rgb, skipped: n ? skipped / n : 0 };
+  return { hist, rgb, skipped: n ? skipped / n : 0, vivid: n ? total / n : 0, grey: n ? grey / n : 0 };
 }
 
-// Pick what to play: top local peaks, or (snap mode) bins grouped by nearest chromatic note.
+// Pick what to play. Main colors: up to 4 peaks (or most common notes when snapping).
+// Full spectrum: every bin (or note) with a meaningful share. value = % of colourful pixels.
 function getTones(h) {
-  const top = Math.max(...h);
+  const top = Math.max(...h), full = playMode.value === 'spectrum';
   if (!(top > 0.5)) return [];
   if (snapToggle.checked) {
     const byNote = new Map();
@@ -258,9 +274,35 @@ function getTones(h) {
       byNote.set(m, (byNote.get(m) || 0) + h[i]);
     }
     const list = [...byNote].map(([m, v]) => ({ key: 'n' + m, freq: midiToFreq(m), value: v, midi: m })).sort((a, b) => b.value - a.value);
-    return list.filter((t) => t.value >= list[0].value * 0.2).slice(0, 4);
+    return full ? list.filter((t) => t.value > 0.5) : list.filter((t) => t.value >= list[0].value * 0.2).slice(0, 4);
   }
-  return topPeaks(h, 4, Math.max(0.8, top * 0.15)).map((p) => ({ key: 'b' + p.index, freq: binFreq(p.index), value: p.value, bin: p.index }));
+  if (full) {
+    const list = [];
+    for (let i = 0; i < NUM_BINS; i++) if (h[i] > 0.5) list.push({ key: 'b' + i, freq: binFreq(i), value: h[i], bin: i });
+    return list.sort((a, b) => b.value - a.value);
+  }
+  return topPeaks(h, 4, Math.max(0.8, top * 0.15)).map((p) => ({ freq: binFreq(p.index), value: p.value, bin: p.index }));
+}
+
+// Main-colors mode: keep each tone on the voice already nearest in pitch, so a drifting peak glides instead of restarting.
+function assignPeakVoices(tones) {
+  const used = new Set();
+  tones.forEach((t) => {
+    let best = -1, bestD = Infinity;
+    peakFreqs.forEach((f, v) => {
+      if (!f || used.has(v)) return;
+      const d = Math.abs(Math.log2(t.freq / f));
+      if (d < bestD) { bestD = d; best = v; }
+    });
+    if (best < 0 || bestD > 0.25) {                // nothing within 3 semitones: take a silent voice if there is one
+      const idle = peakFreqs.findIndex((f, v) => !f && !used.has(v));
+      if (idle >= 0 || best < 0) best = idle >= 0 ? idle : [0, 1, 2, 3].find((v) => !used.has(v));
+    }
+    used.add(best);
+    peakFreqs[best] = t.freq;
+    t.key = 'v' + best;
+  });
+  peakFreqs = peakFreqs.map((f, v) => (used.has(v) ? f : 0));
 }
 
 function processVideoFrame() {
@@ -270,7 +312,9 @@ function processVideoFrame() {
   const w = ANALYSIS_W, h = Math.max(1, Math.round(w * eh / ew));
   if (videoCanvas.width !== w || videoCanvas.height !== h) { videoCanvas.width = w; videoCanvas.height = h; }
   videoCtx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, w, h);
-  const { hist: raw, rgb, skipped } = analyzeColors(videoCtx.getImageData(0, 0, w, h).data);
+  const { hist: raw, rgb, skipped, vivid, grey } = analyzeColors(videoCtx.getImageData(0, 0, w, h).data);
+  colorLevel += (Math.min(1, Math.sqrt(vivid * 3)) - colorLevel) * 0.3;      // loudness follows how colourful the view is
+  greyLevel += (grey - greyLevel) * 0.3;
   for (let i = 0; i < NUM_BINS; i++) {
     smooth[i] += (raw[i] - smooth[i]) * 0.4;                                   // temporal smoothing
     if (raw[i] > 0.3) {
@@ -284,6 +328,7 @@ function processVideoFrame() {
   updateColorNote();
 
   const tones = getTones(smooth);
+  if (playMode.value === 'peaks') assignPeakVoices(tones);
   activeBins = new Set();
   if (snapToggle.checked) {
     const mids = new Set(tones.map((t) => t.midi));
@@ -316,9 +361,15 @@ function drawHighlight(w, h) {
   overlayCtx.imageSmoothingEnabled = true;
   overlayCtx.drawImage(maskCanvas, 0, 0, ew, eh);
 }
+// Light wavelength -> light frequency -> audible frequency -> length of that sound wave in air.
+function conversionChain(nm) {
+  const f = wavelengthToAudibleFreq(nm), spread = spreadSelect.value;
+  return Math.round(nm) + ' nm → ' + Math.round(lightThz(nm)) + ' THz → ' + Math.round(f) + ' Hz (' + frequencyToNote(f) + ') → ' +
+    (SOUND_MPS / f).toFixed(2) + ' m sound wave' + (spread === '1' ? '' : ' (' + spread + '× spread)');
+}
 function updateColorNote() {
   const msg = 'Not counted: ' + Math.round(skippedShare * 100) + '% grey, white or dark. ' +
-    (selectedBin < 0 ? 'Tap a bar to highlight those colors on the camera.' : 'Highlighting ~' + Math.round(binWavelength(selectedBin)) + ' nm. Tap it again to clear.');
+    (selectedBin < 0 ? 'Tap a bar to highlight those colors on the camera.' : 'Tap the bar again to clear.\n' + conversionChain(binWavelength(selectedBin)));
   if (colorNote.textContent !== msg) colorNote.textContent = msg;
 }
 function selectBin(i) {
@@ -478,57 +529,81 @@ function startSonification() {
   if (!AudioCtx) { setStatus('Sound playback is not supported by this browser.'); return; }
   // iOS: treat output as media playback so the silent switch doesn't mute it.
   try { if (navigator.audioSession) navigator.audioSession.type = isMicOn ? 'play-and-record' : 'playback'; } catch (e) { /* unsupported */ }
-  sonifyAudioContext = new AudioCtx();
-  sonifyAudioContext.resume().catch(() => {});
-  activeOscillators = {};
+  const ctx = sonifyAudioContext = new AudioCtx();
+  ctx.resume().catch(() => {});
+  // Signal chain: voices + noise -> master volume -> limiter (so chords never clip) -> speakers.
+  masterGain = ctx.createGain();
+  masterGain.gain.value = parseFloat(volumeControl.value);
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -10; limiter.knee.value = 6; limiter.ratio.value = 12;
+  limiter.attack.value = 0.003; limiter.release.value = 0.25;
+  masterGain.connect(limiter); limiter.connect(ctx.destination);
+  // White light holds every wavelength, so white/grey plays as noise band-limited to the colour range.
+  const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const noise = ctx.createBufferSource();
+  noise.buffer = buf; noise.loop = true;
+  noiseFilters = [ctx.createBiquadFilter(), ctx.createBiquadFilter()];
+  noiseGain = ctx.createGain();
+  noiseGain.gain.value = 0;
+  noise.connect(noiseFilters[0]); noiseFilters[0].connect(noiseFilters[1]); noiseFilters[1].connect(noiseGain); noiseGain.connect(masterGain);
+  noiseFilters.forEach((f) => { f.type = 'bandpass'; });
+  noise.start();
+  voices = {};
+  peakFreqs = [0, 0, 0, 0];
   isSonifying = true;
+  tuneNoise();
   playButton.textContent = 'Stop sound';
   press(playButton, true);
 }
 function stopSonification() {
   if (!isSonifying) return;
-  const ctx = sonifyAudioContext, t = ctx.currentTime;
-  for (const key in activeOscillators) {
-    const { gainNode, oscillator } = activeOscillators[key];
-    gainNode.gain.cancelScheduledValues(t);
-    gainNode.gain.setTargetAtTime(0, t, 0.05);
-    try { oscillator.stop(t + 0.3); } catch (e) { /* already stopped */ }
-  }
-  activeOscillators = {};
+  const ctx = sonifyAudioContext;
+  masterGain.gain.setTargetAtTime(0, ctx.currentTime, 0.05);
+  voices = {};
   isSonifying = false;
   playButton.textContent = 'Play sound';
   press(playButton, false);
-  setTimeout(() => ctx.close().catch(() => {}), 500);
+  setTimeout(() => ctx.close().catch(() => {}), 400);
+}
+// Fit the noise band to the audible range the colours currently map to.
+function tuneNoise() {
+  if (!isSonifying) return;
+  const lo = wavelengthToAudibleFreq(MAX_NM), hi = wavelengthToAudibleFreq(MIN_NM), fc = Math.sqrt(lo * hi);
+  const t = sonifyAudioContext.currentTime;
+  noiseFilters.forEach((f) => { f.frequency.setTargetAtTime(fc, t, 0.05); f.Q.setTargetAtTime(fc / (hi - lo), t, 0.05); });
+  noiseBoost = Math.min(8, 0.5 * Math.sqrt(sonifyAudioContext.sampleRate / 2 / (hi - lo)));   // narrow bands pass less energy
 }
 function updateSonification(tones) {
-  if (sonifyAudioContext.state !== 'running') { sonifyAudioContext.resume().catch(() => {}); return; }
-  const master = parseFloat(volumeControl.value), now = sonifyAudioContext.currentTime, fade = 0.05;
-  const maxV = tones.length ? tones[0].value : 0, current = new Set();
-  const share = 0.7 / Math.sqrt(Math.max(1, tones.length));   // keeps chords from clipping
+  const ctx = sonifyAudioContext;
+  if (ctx.state !== 'running') { ctx.resume().catch(() => {}); return; }
+  const now = ctx.currentTime, type = toneSelect.value, current = new Set();
   tones.forEach((tone) => {
     current.add(tone.key);
-    const gain = maxV > 0 ? (tone.value / maxV) * master * share : 0;
-    let entry = activeOscillators[tone.key];
-    if (!entry) {
-      const oscillator = sonifyAudioContext.createOscillator(), gainNode = sonifyAudioContext.createGain();
-      oscillator.type = 'triangle';                              // extra harmonics carry on small phone speakers
-      oscillator.frequency.setValueAtTime(tone.freq, now);
-      gainNode.gain.setValueAtTime(0, now);
-      oscillator.connect(gainNode); gainNode.connect(sonifyAudioContext.destination);
-      oscillator.start();
-      entry = activeOscillators[tone.key] = { oscillator, gainNode };
+    // Amplitude ~ sqrt(share) keeps each colour's power proportional to how much of the view it covers.
+    const gain = 0.45 * colorLevel * Math.sqrt(tone.value / 100);
+    let v = voices[tone.key];
+    if (!v) {
+      const osc = ctx.createOscillator(), amp = ctx.createGain();
+      osc.frequency.value = tone.freq;
+      amp.gain.value = 0;
+      osc.connect(amp); amp.connect(masterGain);
+      osc.start();
+      v = voices[tone.key] = { osc, amp, silent: true };
     }
-    entry.gainNode.gain.setTargetAtTime(gain, now, fade);
-    entry.oscillator.frequency.setTargetAtTime(tone.freq, now, 0.03);
+    if (v.osc.type !== type) v.osc.type = type;
+    if (v.silent) { v.osc.frequency.cancelScheduledValues(now); v.osc.frequency.setValueAtTime(tone.freq, now); }   // jump, don't glide from silence
+    else v.osc.frequency.setTargetAtTime(tone.freq, now, 0.06);
+    v.amp.gain.setTargetAtTime(gain, now, 0.05);
+    v.silent = false; v.lastOn = now;
   });
-  for (const key in activeOscillators) {
+  for (const key in voices) {
     if (current.has(key)) continue;
-    const { gainNode, oscillator } = activeOscillators[key];
-    gainNode.gain.cancelScheduledValues(now);
-    gainNode.gain.setTargetAtTime(0, now, fade);
-    try { oscillator.stop(now + fade * 5); } catch (e) { /* ignore */ }
-    delete activeOscillators[key];
+    const v = voices[key];
+    if (!v.silent) { v.amp.gain.setTargetAtTime(0, now, 0.05); v.silent = true; }
+    else if (now - v.lastOn > 2) { try { v.osc.stop(); } catch (e) { /* already stopped */ } v.amp.disconnect(); delete voices[key]; }
   }
+  noiseGain.gain.setTargetAtTime(noiseToggle.checked ? 0.3 * noiseBoost * Math.sqrt(greyLevel) : 0, now, 0.08);
 }
 
 /* ---------- charts ---------- */
@@ -586,7 +661,7 @@ function updateBars(chart, active) {
 }
 function refreshHzLabels(force) {
   const showNotes = noteToggle.checked, snap = snapToggle.checked;
-  const sig = [showNotes, snap, scaleSelect.value, octaveShift.value, [...activeBins].join()].join('|');
+  const sig = [showNotes, snap, spreadSelect.value, octaveShift.value, [...activeBins].join()].join('|');
   if (!force && sig === hzSig) return;
   hzSig = sig;
   let labels;
@@ -615,17 +690,24 @@ $('closeSheet').addEventListener('click', closeSheet);
 $('sheet').addEventListener('click', (e) => { if (e.target === $('sheet')) closeSheet(); });
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('sheet').hidden) closeSheet(); });
 
-volumeControl.addEventListener('input', () => { $('volumeValue').textContent = Math.round(volumeControl.value * 100); });
-const SCALE_HINTS = {
-  log: 'Uses the real physics of color, shifted down into hearing range. Red is lowest, violet highest.',
-  exponential: 'Spreads the colors evenly across four octaves of notes, so every step sounds equally big. Red is lowest, violet highest.',
-  linear: 'Pitch rises at a constant rate from red to violet. Simple, but low colors sound more spread out than high ones.'
+volumeControl.addEventListener('input', () => {
+  $('volumeValue').textContent = Math.round(volumeControl.value * 100);
+  if (isSonifying) masterGain.gain.setTargetAtTime(parseFloat(volumeControl.value), sonifyAudioContext.currentTime, 0.05);
+});
+const redrawHz = () => {
+  const lo = wavelengthToAudibleFreq(MAX_NM), hi = wavelengthToAudibleFreq(MIN_NM);
+  $('octaveValue').textContent = octaveShift.value;
+  $('rangeHint').textContent = 'Red to violet plays at ' + Math.round(lo) + '–' + Math.round(hi) + ' Hz (' + frequencyToNote(lo) + '–' + frequencyToNote(hi) +
+    '). In air, those sound waves are ' + (SOUND_MPS / hi).toFixed(2) + '–' + (SOUND_MPS / lo).toFixed(2) + ' m long.';
+  refreshHzLabels(true);
+  hzChart.update('none');
+  tuneNoise();
+  updateColorNote();
 };
-const redrawHz = () => { $('scaleHint').textContent = SCALE_HINTS[scaleSelect.value]; $('octaveValue').textContent = octaveShift.value; refreshHzLabels(true); hzChart.update('none'); };
 octaveShift.addEventListener('input', redrawHz);
 noteToggle.addEventListener('change', redrawHz);
 snapToggle.addEventListener('change', redrawHz);
-scaleSelect.addEventListener('change', redrawHz);
+spreadSelect.addEventListener('change', redrawHz);
 micGainControl.addEventListener('input', () => {
   const g = parseFloat(micGainControl.value);
   if (micGainNode && micAudioContext) micGainNode.gain.setTargetAtTime(g, micAudioContext.currentTime, 0.01);
