@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0f1115">
 <title>Live Audio-Visual Analyzer</title>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
 <style>
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -26,9 +25,9 @@ button, select, input { font: inherit; touch-action: manipulation; }
 
 .card { background: #181b21; border: 1px solid #262b34; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
 .card h2 { font-size: .98rem; font-weight: 600; margin: 0 0 8px; }
-.chart-box { position: relative; height: 200px; }
-.chart-box canvas { cursor: pointer; }
-.chart-note { margin: -2px 0 8px; min-height: 1.3em; white-space: pre-line; color: #8791a1; font-size: .82rem; line-height: 1.4; }
+.wheel-box { width: 100%; max-width: 400px; aspect-ratio: 1; margin: 0 auto; }
+.wheel-box canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+.chart-note { margin: -2px 0 8px; min-height: 2.6em; white-space: pre-line; color: #8791a1; font-size: .82rem; line-height: 1.4; }
 
 /* Bottom dock: the main controls always sit under the thumb */
 .dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); background: rgba(15,17,21,.94); border-top: 1px solid #262b34; backdrop-filter: blur(8px); }
@@ -48,7 +47,7 @@ button, select, input { font: inherit; touch-action: manipulation; }
 .check { display: flex; align-items: center; gap: 12px; min-height: 44px; font-weight: 600; }
 .check input { width: 24px; height: 24px; margin: 0; accent-color: #ffd24a; }
 .hint { font-weight: 400; color: #8791a1; font-size: .82rem; }
-@media (min-width: 700px) { .chart-box { height: 250px; } #video { height: 260px; } }
+@media (min-width: 700px) { #video { height: 260px; } }
 @media (prefers-reduced-motion: reduce) { * { transition-duration: .01ms !important; } }
 </style>
 </head>
@@ -63,13 +62,9 @@ button, select, input { font: inherit; touch-action: manipulation; }
       <button id="flipButton" class="flip" type="button">Flip camera</button>
     </div>
     <div class="card">
-      <h2>Color distribution (approximate wavelength)</h2>
+      <h2>Color wheel (gold outline = playing)</h2>
       <p id="colorNote" class="chart-note" aria-live="off"></p>
-      <div class="chart-box"><canvas id="wavelengthHistogram"></canvas></div>
-    </div>
-    <div class="card">
-      <h2>Sonified frequency (gold = playing)</h2>
-      <div class="chart-box"><canvas id="hzHistogram"></canvas></div>
+      <div class="wheel-box"><canvas id="wheel" aria-label="Color wheel of the camera view"></canvas></div>
     </div>
   </section>
 </main>
@@ -92,14 +87,15 @@ button, select, input { font: inherit; touch-action: manipulation; }
       <select id="spreadSelect"><option value="1">1× (true ratios)</option><option value="2">2× (wider)</option><option value="4">4× (much wider)</option></select>
       <span class="hint">Visible light spans less than one octave, so at 1× the colors sound close together. Wider spreads separate them more clearly, but aren't physically accurate.</span></div>
     <div class="field"><label for="toneSelect">Tone</label>
-      <select id="toneSelect"><option value="sine">Pure (sine wave, like a single wavelength of light)</option><option value="triangle">Bright (carries better on phone speakers)</option></select></div>
+      <select id="toneSelect"><option value="sine">Pure (sine wave, like a single wavelength of light)</option><option value="bright">Bright (adds octave overtones; carries better on phone speakers)</option></select></div>
     <div class="field"><label for="playMode">What plays</label>
-      <select id="playMode"><option value="peaks">Main colors (up to 4 tones)</option><option value="spectrum">Full spectrum (every color present)</option></select></div>
+      <select id="playMode"><option value="peaks">Main colors (up to 4)</option><option value="spectrum">Full spectrum (every color present)</option></select>
+      <span class="hint">Purples and magentas aren't in the rainbow; the eye mixes them from violet and red light, so each one plays as a violet + red pair.</span></div>
     <div class="field"><label for="whiteMode">White and grey play as</label>
       <select id="whiteMode"><option value="chord">Soft chord (red + green + blue)</option><option value="noise">Noise across the color range</option><option value="off">Silence</option></select>
       <span class="hint">White light is every color at once. Its sound gets louder with how much white is in view, and black (no light) is always silent.</span></div>
     <label class="check"><input type="checkbox" id="snapToggle"> <span>Snap tones to chromatic notes<br><span class="hint">Groups colors by their nearest musical note.</span></span></label>
-    <label class="check"><input type="checkbox" id="noteToggle"> Show note names on chart</label>
+    <label class="check"><input type="checkbox" id="noteToggle"> Show note names around the wheel</label>
   </div>
 </div>
 
@@ -115,41 +111,42 @@ const AudioCtx = window.AudioContext || window.webkitAudioContext;
 const setStatus = (m) => { statusMessage.textContent = m || ''; };
 const press = (btn, on) => btn.setAttribute('aria-pressed', String(on));
 
-// The hue table below only reaches 425-660 nm, so the axis is fitted to that span.
-const NUM_BINS = 64, MIN_NM = 420, MAX_NM = 665, ANALYSIS_W = 96;
+// The wheel is split into hue bins; hues past violet (270-360) are purples with no single wavelength.
+const NUM_BINS = 36, BIN_DEG = 360 / NUM_BINS, SPECTRAL_END = 270, ANALYSIS_W = 96;
+// The hue table below only reaches 425-660 nm; this span sets the centre for Spread and the noise band.
+const MIN_NM = 420, MAX_NM = 665;
 const MIN_CHROMA = 24;   // channel spread (0-255) below which a pixel's hue is mostly camera noise
 // HSV hue (degrees) -> approximate spectral wavelength (nm); far closer to perception than a straight line.
 const HUE_NM = [[0,660],[30,615],[60,580],[120,532],[180,495],[240,465],[270,425]];
+const VIOLET_NM = HUE_NM[HUE_NM.length - 1][1], RED_NM = HUE_NM[0][1];
 
 let cameraStream, isCameraOn = false, facing = 'user';
-let wavelengthChart, hzChart;
-let smooth = new Float32Array(NUM_BINS), yMax = 10, activeBins = new Set(), hzSig = '';
+let smooth = new Float32Array(NUM_BINS), wheelScale = 10, activeBins = new Set();
 let lastCamTime = 0;
 const videoCanvas = document.createElement('canvas');
 const videoCtx = videoCanvas.getContext('2d', { willReadFrequently: true });
 const overlay = $('videoOverlay'), overlayCtx = overlay.getContext('2d'), colorNote = $('colorNote');
 const maskCanvas = document.createElement('canvas'), maskCtx = maskCanvas.getContext('2d');
-let pixelBin = new Int16Array(0), selectedBin = -1;
+const wheel = $('wheel'), wheelCtx = wheel.getContext('2d');
+let pixelBin = new Int16Array(0), selectedBin = -1, wheelGeom = null;
 const binRGB = new Float32Array(NUM_BINS * 3), hasRGB = new Uint8Array(NUM_BINS); // smoothed average real colour per bin
 let colorLevel = 0, whiteLevel = 0, blackLevel = 0;   // smoothed scene make-up; colorLevel also sets colour loudness
-let sonifyAudioContext, isSonifying = false, voices = {}, peakFreqs = [0, 0, 0, 0];
+let sonifyAudioContext, isSonifying = false, voices = {}, peakFreqs = new Array(8).fill(0), brightWave;
 let masterGain, noiseGain, noiseFilters = [], noiseBoost = 1;
 
 /* ---------- helpers ---------- */
-function topPeaks(arr, n, minVal, radius = 1) {
+const wrapBin = (i) => ((i % NUM_BINS) + NUM_BINS) % NUM_BINS;
+const binDist = (a, b) => { const d = Math.abs(a - b) % NUM_BINS; return Math.min(d, NUM_BINS - d); };
+// Local maxima on the wheel; it wraps, so the last bin neighbours the first.
+function topPeaks(arr, n, minVal) {
   const peaks = [];
-  for (let i = 0; i < arr.length; i++) {
+  for (let i = 0; i < NUM_BINS; i++) {
     const v = arr[i];
-    if (!(v > minVal)) continue;
-    let isMax = true;
-    for (let j = Math.max(0, i - radius); j <= Math.min(arr.length - 1, i + radius); j++) {
-      if (j !== i && (arr[j] > v || (j < i && arr[j] === v))) { isMax = false; break; }
-    }
-    if (isMax) peaks.push({ index: i, value: v });
+    if (v > minVal && v >= arr[wrapBin(i - 1)] && v > arr[wrapBin(i + 1)]) peaks.push({ index: i, value: v });
   }
   return peaks.sort((a, b) => b.value - a.value).slice(0, n);
 }
-const binWavelength = (i) => MIN_NM + ((i + 0.5) / NUM_BINS) * (MAX_NM - MIN_NM);
+const binHue = (i) => (i + 0.5) * BIN_DEG;
 const freqToMidi = (f) => Math.round(69 + 12 * Math.log2(f / 440));
 const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
 const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -159,13 +156,18 @@ const frequencyToNote = (f) => (f > 0 ? midiName(freqToMidi(f)) : '-');
 const LIGHT_MPS = 299792458, SOUND_MPS = 343;
 const lightThz = (nm) => LIGHT_MPS / nm / 1e3;
 // Light's own frequency dropped N octaves. Spread > 1 widens intervals around the range's centre (not physical).
-function wavelengthToAudibleFreq(nm) {
+function spreadParams() {
   const drop = Math.pow(2, parseFloat(octaveShift.value)), spread = parseFloat(spreadSelect.value);
-  const f = LIGHT_MPS / (nm * 1e-9) / drop;
-  const fc = LIGHT_MPS / (Math.sqrt(MIN_NM * MAX_NM) * 1e-9) / drop;
+  return { drop, spread, fc: LIGHT_MPS / (Math.sqrt(MIN_NM * MAX_NM) * 1e-9) / drop };
+}
+function wavelengthToAudibleFreq(nm) {
+  const { drop, spread, fc } = spreadParams(), f = LIGHT_MPS / (nm * 1e-9) / drop;
   return Math.min(12000, Math.max(20, fc * Math.pow(f / fc, spread)));
 }
-const binFreq = (i) => wavelengthToAudibleFreq(binWavelength(i));
+function audibleFreqToNm(f) {
+  const { drop, spread, fc } = spreadParams();
+  return LIGHT_MPS / (fc * Math.pow(f / fc, 1 / spread) * drop) * 1e9;
+}
 
 function mediaError(kind, err) {
   const name = (err && err.name) || 'Error';
@@ -192,13 +194,27 @@ function hueToNm(h) {
       return n0 + (n1 - n0) * (h - h0) / (h1 - h0);
     }
   }
-  return HUE_NM[HUE_NM.length - 1][1];
+  return VIOLET_NM;
 }
+function nmToHue(nm) {
+  for (let k = 1; k < HUE_NM.length; k++) {
+    if (nm >= HUE_NM[k][1]) { const [h0, n0] = HUE_NM[k - 1], [h1, n1] = HUE_NM[k]; return h0 + (h1 - h0) * (nm - n0) / (n1 - n0); }
+  }
+  return SPECTRAL_END;
+}
+// What each bin is made of in light: one wavelength for rainbow hues; for purples, a violet + red mix
+// that shifts from mostly violet (next to blue) to mostly red (next to red).
+const BIN_PARTS = Array.from({ length: NUM_BINS }, (_, i) => {
+  const h = binHue(i);
+  if (h <= SPECTRAL_END) return [{ nm: hueToNm(h), w: 1 }];
+  const t = (h - SPECTRAL_END) / (360 - SPECTRAL_END);
+  return [{ nm: VIOLET_NM, w: 1 - t }, { nm: RED_NM, w: t }];
+});
 
 // Each pixel splits into colour + white + black, as in the HWB model: max - min is coloured light (chroma),
 // min is light shared equally by R, G and B (white), and 255 - max is missing light (black).
-// Only chroma goes on the wavelength axis, so dim or washed-out pixels no longer pile up as false orange.
-// Returns the normalised histogram, the average pixel colour per bin, mean chroma (vivid) and mean white and black (0-1).
+// Only chroma goes on the wheel, so dim or washed-out pixels don't show up as false colour.
+// Returns the normalised hue histogram, the average pixel colour per bin, mean chroma (vivid) and mean white and black (0-1).
 // Also records each pixel's nearest bin in pixelBin (-1 = no reliable hue) for the camera highlight.
 function analyzeColors(data) {
   const hist = new Float32Array(NUM_BINS), rgb = new Float32Array(NUM_BINS * 3), n = data.length / 4;
@@ -213,18 +229,12 @@ function analyzeColors(data) {
     white += min / 255;
     let hue = max === r ? 60 * ((g - b) / delta) : max === g ? 60 * (2 + (b - r) / delta) : 60 * (4 + (r - g) / delta);
     hue = (hue + 360) % 360;
-    let w = (delta - MIN_CHROMA) / (255 - MIN_CHROMA), nm;   // chroma above the noise floor: how much coloured light the pixel carries
-    if (hue <= 270) nm = hueToNm(hue);
-    else {                                          // purples/magentas have no single wavelength: split to the nearer end, half weight
-      nm = hue < 315 ? HUE_NM[6][1] : HUE_NM[0][1];
-      w *= 0.5;
-    }
-    // Soft binning: share weight between the two nearest bins so the plot is smooth, not spiky.
-    const pos = Math.min(NUM_BINS - 1, Math.max(0, ((nm - MIN_NM) / (MAX_NM - MIN_NM)) * NUM_BINS - 0.5));
-    const i0 = Math.floor(pos), f = pos - i0;
-    add(i0, w * (1 - f), r, g, b);
-    add(i0 + 1 < NUM_BINS ? i0 + 1 : i0, w * f, r, g, b);
-    pixelBin[p] = Math.round(pos);
+    const w = (delta - MIN_CHROMA) / (255 - MIN_CHROMA);   // chroma above the noise floor: how much coloured light the pixel carries
+    // Soft binning around the circle: share weight between the two nearest bins so the wheel is smooth, not spiky.
+    const pos = hue / BIN_DEG - 0.5, i0 = Math.floor(pos), f = pos - i0;
+    add(wrapBin(i0), w * (1 - f), r, g, b);
+    add(wrapBin(i0 + 1), w * f, r, g, b);
+    pixelBin[p] = wrapBin(Math.round(pos));
     total += w;
   }
   for (let i = 0; i < NUM_BINS; i++) {
@@ -234,33 +244,35 @@ function analyzeColors(data) {
   return { hist, rgb, vivid: n ? total / n : 0, white: n ? white / n : 0, black: n ? black / n : 0 };
 }
 
-// Pick what to play. Main colors: up to 4 peaks (or most common notes when snapping).
-// Full spectrum: every bin (or note) with a meaningful share. value = % of colourful pixels.
+// Pick what to play. Main colors: up to 4 wheel peaks. Full spectrum: every bin with a meaningful share.
+// Purple bins contribute two tones (violet + red). Snapping merges tones onto their nearest note.
+// value = % of the colour in view.
 function getTones(h) {
-  const top = Math.max(...h), full = playMode.value === 'spectrum';
+  const top = Math.max(...h);
   if (!(top > 0.5)) return [];
+  const bins = playMode.value === 'spectrum'
+    ? [...h.keys()].filter((i) => h[i] > 0.5)
+    : topPeaks(h, 4, Math.max(0.8, top * 0.15)).map((p) => p.index);
+  let tones = [];
+  bins.forEach((i) => BIN_PARTS[i].forEach((c, k) => {
+    if (c.w * h[i] > 0.1) tones.push({ key: 'b' + i + '_' + k, freq: wavelengthToAudibleFreq(c.nm), value: c.w * h[i], bins: [i] });
+  }));
   if (snapToggle.checked) {
     const byNote = new Map();
-    for (let i = 0; i < NUM_BINS; i++) {
-      if (h[i] <= 0) continue;
-      const m = freqToMidi(binFreq(i));
-      byNote.set(m, (byNote.get(m) || 0) + h[i]);
-    }
-    const list = [...byNote].map(([m, v]) => ({ key: 'n' + m, freq: midiToFreq(m), value: v, midi: m })).sort((a, b) => b.value - a.value);
-    return full ? list.filter((t) => t.value > 0.5) : list.filter((t) => t.value >= list[0].value * 0.2).slice(0, 4);
+    tones.forEach((t) => {
+      const m = freqToMidi(t.freq), e = byNote.get(m) || { key: 'n' + m, freq: midiToFreq(m), value: 0, bins: [] };
+      e.value += t.value; e.bins.push(...t.bins);
+      byNote.set(m, e);
+    });
+    tones = [...byNote.values()];
   }
-  if (full) {
-    const list = [];
-    for (let i = 0; i < NUM_BINS; i++) if (h[i] > 0.5) list.push({ key: 'b' + i, freq: binFreq(i), value: h[i], bin: i });
-    return list.sort((a, b) => b.value - a.value);
-  }
-  return topPeaks(h, 4, Math.max(0.8, top * 0.15)).map((p) => ({ freq: binFreq(p.index), value: p.value, bin: p.index }));
+  return tones.sort((a, b) => b.value - a.value);
 }
 
 // Main-colors mode: keep each tone on the voice already nearest in pitch, so a drifting peak glides instead of restarting.
 function assignPeakVoices(tones) {
   const used = new Set();
-  tones.forEach((t) => {
+  tones.slice(0, peakFreqs.length).forEach((t) => {
     let best = -1, bestD = Infinity;
     peakFreqs.forEach((f, v) => {
       if (!f || used.has(v)) return;
@@ -269,7 +281,7 @@ function assignPeakVoices(tones) {
     });
     if (best < 0 || bestD > 0.25) {                // nothing within 3 semitones: take a silent voice if there is one
       const idle = peakFreqs.findIndex((f, v) => !f && !used.has(v));
-      if (idle >= 0 || best < 0) best = idle >= 0 ? idle : [0, 1, 2, 3].find((v) => !used.has(v));
+      if (idle >= 0 || best < 0) best = idle >= 0 ? idle : peakFreqs.findIndex((_, v) => !used.has(v));
     }
     used.add(best);
     peakFreqs[best] = t.freq;
@@ -302,23 +314,13 @@ function processVideoFrame() {
 
   const tones = getTones(smooth);
   if (playMode.value === 'peaks') assignPeakVoices(tones);
-  activeBins = new Set();
-  if (snapToggle.checked) {
-    const mids = new Set(tones.map((t) => t.midi));
-    for (let i = 0; i < NUM_BINS; i++) if (smooth[i] > 0.05 && mids.has(freqToMidi(binFreq(i)))) activeBins.add(i);
-  } else tones.forEach((t) => activeBins.add(t.bin));
-
-  const peak = Math.max(...smooth);
-  yMax += (Math.min(100, Math.max(5, peak * 1.2)) - yMax) * 0.2;                            // steady axis, no jitter
-  updateBars(wavelengthChart, null);
-  updateBars(hzChart, activeBins);
-  refreshHzLabels(false);
-  wavelengthChart.update('none');
-  hzChart.update('none');
+  activeBins = new Set(tones.flatMap((t) => t.bins));
+  wheelScale += (Math.min(100, Math.max(5, Math.max(...smooth) * 1.1)) - wheelScale) * 0.2;   // steady scale, no jitter
+  drawWheel();
   if (isSonifying) updateSonification(tones);
 }
 
-// Dims everything except pixels within one bin of the tapped bar.
+// Dims everything except pixels within one bin of the tapped wedge.
 function drawHighlight(w, h) {
   const ew = overlay.clientWidth, eh = overlay.clientHeight;
   if (overlay.width !== ew || overlay.height !== eh) { overlay.width = ew; overlay.height = eh; }
@@ -328,7 +330,7 @@ function drawHighlight(w, h) {
   const img = maskCtx.createImageData(w, h), d = img.data;
   for (let p = 0; p < pixelBin.length; p++) {
     const b = pixelBin[p];
-    d[p * 4 + 3] = b >= 0 && Math.abs(b - selectedBin) <= 1 ? 0 : 180;
+    d[p * 4 + 3] = b >= 0 && binDist(b, selectedBin) <= 1 ? 0 : 180;
   }
   maskCtx.putImageData(img, 0, 0);
   overlayCtx.imageSmoothingEnabled = true;
@@ -340,10 +342,16 @@ function conversionChain(nm) {
   return Math.round(nm) + ' nm → ' + Math.round(lightThz(nm)) + ' THz → ' + Math.round(f) + ' Hz (' + frequencyToNote(f) + ') → ' +
     (SOUND_MPS / f).toFixed(2) + ' m sound wave' + (spread === '1' ? '' : ' (' + spread + '× spread)');
 }
+function describeBin(i) {
+  const parts = BIN_PARTS[i];
+  if (parts.length === 1) return conversionChain(parts[0].nm);
+  const tone = (c) => Math.round(c.w * 100) + '% ' + Math.round(c.nm) + ' nm → ' + Math.round(wavelengthToAudibleFreq(c.nm)) + ' Hz (' + frequencyToNote(wavelengthToAudibleFreq(c.nm)) + ')';
+  return 'Purple isn\'t in the rainbow; it\'s violet + red light: ' + tone(parts[0]) + ' + ' + tone(parts[1]);
+}
 function updateColorNote() {
   const c = Math.max(0, 1 - whiteLevel - blackLevel), pct = (v) => Math.round(v * 100) + '%';
-  const msg = 'Scene: ' + pct(c) + ' color · ' + pct(whiteLevel) + ' white · ' + pct(blackLevel) + ' black. ' +
-    (selectedBin < 0 ? 'Tap a bar to highlight those colors on the camera.' : 'Tap the bar again to clear.\n' + conversionChain(binWavelength(selectedBin)));
+  const msg = 'Scene: ' + pct(c) + ' color · ' + pct(whiteLevel) + ' white · ' + pct(blackLevel) + ' black (center of the wheel). ' +
+    (selectedBin < 0 ? 'Tap a wedge to highlight those colors on the camera.' : 'Tap it again to clear.\n' + describeBin(selectedBin));
   if (colorNote.textContent !== msg) colorNote.textContent = msg;
 }
 function selectBin(i) {
@@ -406,6 +414,8 @@ function startSonification() {
   try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* unsupported */ }
   const ctx = sonifyAudioContext = new AudioCtx();
   ctx.resume().catch(() => {});
+  // "Bright" adds overtones only at whole octaves (2x, 4x), which blend into the note instead of sounding as extra pitches.
+  brightWave = ctx.createPeriodicWave(new Float32Array(5), new Float32Array([0, 1, 0.45, 0, 0.2]));
   // Signal chain: voices + noise -> master volume -> limiter (so chords never clip) -> speakers.
   masterGain = ctx.createGain();
   masterGain.gain.value = parseFloat(volumeControl.value);
@@ -425,7 +435,7 @@ function startSonification() {
   noiseFilters.forEach((f) => { f.type = 'bandpass'; });
   noise.start();
   voices = {};
-  peakFreqs = [0, 0, 0, 0];
+  peakFreqs.fill(0);
   isSonifying = true;
   tuneNoise();
   playButton.textContent = 'Stop sound';
@@ -474,9 +484,9 @@ function updateSonification(tones) {
       amp.gain.value = 0;
       osc.connect(amp); amp.connect(masterGain);
       osc.start();
-      v = voices[tone.key] = { osc, amp, silent: true };
+      v = voices[tone.key] = { osc, amp, silent: true, type: 'sine' };
     }
-    if (v.osc.type !== type) v.osc.type = type;
+    if (v.type !== type) { if (type === 'bright') v.osc.setPeriodicWave(brightWave); else v.osc.type = 'sine'; v.type = type; }
     if (v.silent) { v.osc.frequency.cancelScheduledValues(now); v.osc.frequency.setValueAtTime(tone.freq, now); }   // jump, don't glide from silence
     else v.osc.frequency.setTargetAtTime(tone.freq, now, 0.06);
     v.amp.gain.setTargetAtTime(gain, now, 0.05);
@@ -491,78 +501,110 @@ function updateSonification(tones) {
   noiseGain.gain.setTargetAtTime(whiteMode.value === 'noise' ? 0.3 * noiseBoost * Math.sqrt(whiteLevel) : 0, now, 0.08);
 }
 
-/* ---------- charts ---------- */
-const binHues = Array.from({ length: NUM_BINS }, (_, i) => {
-  // Fallback bar colour: the hue that maps to each bin's wavelength (inverse of hueToNm).
-  const nm = binWavelength(i);
-  let hue = 270;
-  for (let k = 1; k < HUE_NM.length; k++) {
-    if (nm >= HUE_NM[k][1]) { const [h0, n0] = HUE_NM[k - 1], [h1, n1] = HUE_NM[k]; hue = h0 + (h1 - h0) * (nm - n0) / (n1 - n0); break; }
-  }
-  return hue;
-});
-// Bars show the average real colour of their pixels, lifted so dark colours stay visible on the dark page.
-function barColor(i, a) {
-  if (!hasRGB[i]) return `hsla(${binHues[i]}, 85%, 52%, ${a})`;
+/* ---------- colour wheel ---------- */
+// Wedges show the average real colour of their pixels, lifted so dark colours stay visible on the dark page.
+function binColor(i, a) {
+  if (!hasRGB[i]) return `hsla(${binHue(i)}, 85%, 52%, ${a})`;
   const r = binRGB[i * 3], g = binRGB[i * 3 + 1], b = binRGB[i * 3 + 2];
   const lift = Math.max(1, 150 / Math.max(1, r, g, b)), ch = (v) => Math.min(255, Math.round(v * lift));
   return `rgba(${ch(r)}, ${ch(g)}, ${ch(b)}, ${a})`;
 }
-
-function makeBarChart(canvas, yTitle) {
-  return new Chart(canvas, {
-    type: 'bar',
-    data: { labels: [], datasets: [{ data: new Array(NUM_BINS).fill(0), backgroundColor: binHues.map((_, i) => barColor(i, 1)), barPercentage: 1, categoryPercentage: 1 }] },
-    options: {
-      animation: false, responsive: true, maintainAspectRatio: false,
-      onClick: (e, _els, chart) => {
-        const hit = chart.getElementsAtEventForMode(e.native, 'index', { intersect: false }, false)[0];
-        selectBin(hit && hit.index !== selectedBin ? hit.index : -1);
-      },
-      plugins: { legend: { display: false }, tooltip: { enabled: false } },
-      scales: {
-        x: { grid: { display: false }, ticks: { autoSkip: true, maxTicksLimit: 8, maxRotation: 0, minRotation: 0 } },
-        y: { min: 0, max: 10, ticks: { maxTicksLimit: 5, callback: (v) => Math.round(v) + '%' }, title: { display: true, text: yTitle } }
-      }
+const hueAngle = (hue) => (hue - 90) * Math.PI / 180;   // red at the top, hues run clockwise
+function sectorPath(ctx, cx, cy, r0, r1, h0, h1) {
+  ctx.beginPath();
+  ctx.arc(cx, cy, r1, hueAngle(h0), hueAngle(h1));
+  ctx.arc(cx, cy, r0, hueAngle(h1), hueAngle(h0), true);
+  ctx.closePath();
+}
+// Rim labels: wavelengths, or the note each colour plays. Labels too close to the previous one are skipped.
+function wheelLabels() {
+  const out = [];
+  if (noteToggle.checked) {
+    const lo = freqToMidi(wavelengthToAudibleFreq(RED_NM)), hi = freqToMidi(wavelengthToAudibleFreq(VIOLET_NM));
+    for (let m = lo; m <= hi; m++) {
+      const nm = audibleFreqToNm(midiToFreq(m));
+      if (nm <= RED_NM + 3 && nm >= VIOLET_NM - 3) out.push({ hue: nmToHue(Math.min(RED_NM, Math.max(VIOLET_NM, nm))), text: midiName(m) });
     }
+  } else [450, 500, 550, 600, 650].forEach((nm) => out.push({ hue: nmToHue(nm), text: nm + 'nm' }));
+  return out;
+}
+function drawWheel() {
+  const size = wheel.clientWidth, dpr = window.devicePixelRatio || 1;
+  if (!size) return;
+  const px = Math.round(size * dpr);
+  if (wheel.width !== px) { wheel.width = wheel.height = px; }
+  const ctx = wheelCtx;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, size, size);
+  const cx = size / 2, cy = size / 2, R = size / 2 - 34, rim = 8, r0 = R * 0.3, rMax = R - rim - 3;
+  wheelGeom = { cx, cy, r0, R };
+
+  // Purples have no wavelength of their own: shade their sector so the gap in the rainbow is visible.
+  sectorPath(ctx, cx, cy, r0, rMax, SPECTRAL_END, 360);
+  ctx.fillStyle = 'rgba(255,255,255,.035)'; ctx.fill();
+  // Faint guide circle at the scale's maximum.
+  ctx.beginPath(); ctx.arc(cx, cy, rMax, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,255,255,.08)'; ctx.lineWidth = 1; ctx.stroke();
+  // Reference hue ring around the rim.
+  for (let d = 0; d < 360; d += 3) {
+    sectorPath(ctx, cx, cy, R - rim, R, d, d + 3.4);
+    ctx.fillStyle = `hsl(${d}, 85%, 55%)`; ctx.fill();
+  }
+
+  // Wedges: area grows with share of the colour in view.
+  for (let i = 0; i < NUM_BINS; i++) {
+    const v = smooth[i];
+    if (!(v > 0.05)) continue;
+    const r = r0 + (rMax - r0) * Math.sqrt(Math.min(1, v / wheelScale));
+    const a = selectedBin < 0 || binDist(i, selectedBin) <= 1 ? 1 : 0.3;
+    sectorPath(ctx, cx, cy, r0, r, i * BIN_DEG + 0.6, (i + 1) * BIN_DEG - 0.6);
+    ctx.fillStyle = binColor(i, a); ctx.fill();
+    if (activeBins.has(i)) { ctx.strokeStyle = `rgba(255, 210, 74, ${a})`; ctx.lineWidth = 2; ctx.stroke(); }
+  }
+  if (selectedBin >= 0) {
+    sectorPath(ctx, cx, cy, R - rim - 1, R + 1, selectedBin * BIN_DEG, (selectedBin + 1) * BIN_DEG);
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+  }
+
+  // Centre: the scene's colour / white / black mix as a small pie, starting at the top.
+  const c = Math.max(0, 1 - whiteLevel - blackLevel), rc = r0 - 6;
+  let start = -Math.PI / 2;
+  const colorFill = ctx.createConicGradient ? ctx.createConicGradient(0, cx, cy) : '#8a7cff';
+  if (ctx.createConicGradient) for (let d = 0; d <= 360; d += 60) colorFill.addColorStop(d / 360, `hsl(${d - 90}, 80%, 55%)`);
+  [[c, colorFill], [whiteLevel, '#e9ecf1'], [blackLevel, '#000']].forEach(([share, fill]) => {
+    if (share <= 0.005) return;
+    const end = start + share * Math.PI * 2;
+    ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, rc, start, end); ctx.closePath();
+    ctx.fillStyle = fill; ctx.fill();
+    start = end;
   });
-}
-function initCharts() {
-  Chart.defaults.font.size = 11;
-  Chart.defaults.color = '#9aa3b2';
-  Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
-  wavelengthChart = makeBarChart($('wavelengthHistogram'), 'Share of color');
-  hzChart = makeBarChart($('hzHistogram'), 'Share of color');
-  wavelengthChart.data.labels = Array.from({ length: NUM_BINS }, (_, i) => Math.round(binWavelength(i)) + 'nm');
-  refreshHzLabels(true);
-}
-function updateBars(chart, active) {
-  chart.data.datasets[0].data = Array.from(smooth);
-  chart.options.scales.y.max = yMax;
-  chart.data.datasets[0].backgroundColor = binHues.map((_, i) => {
-    const a = selectedBin < 0 || Math.abs(i - selectedBin) <= 1 ? 1 : 0.3;   // fade bars outside the selection
-    return active && active.has(i) ? `rgba(255, 210, 74, ${a})` : barColor(i, a);
+  ctx.beginPath(); ctx.arc(cx, cy, rc, 0, Math.PI * 2);
+  ctx.strokeStyle = '#333a46'; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // Rim labels and ticks.
+  ctx.font = '11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  let lastHue = -99;
+  wheelLabels().sort((p, q) => p.hue - q.hue).forEach(({ hue, text }) => {
+    if (hue - lastHue < 9) return;
+    lastHue = hue;
+    const t = hueAngle(hue), cos = Math.cos(t), sin = Math.sin(t);
+    ctx.beginPath(); ctx.moveTo(cx + cos * R, cy + sin * R); ctx.lineTo(cx + cos * (R + 4), cy + sin * (R + 4));
+    ctx.strokeStyle = '#5c6575'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = '#9aa3b2'; ctx.fillText(text, cx + cos * (R + 17), cy + sin * (R + 17));
   });
+  const tp = hueAngle((SPECTRAL_END + 360) / 2);
+  ctx.fillStyle = '#6f7887'; ctx.font = 'italic 11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+  ctx.fillText('purples', cx + Math.cos(tp) * (R + 17), cy + Math.sin(tp) * (R + 17));
 }
-function refreshHzLabels(force) {
-  const showNotes = noteToggle.checked, snap = snapToggle.checked;
-  const sig = [showNotes, snap, spreadSelect.value, octaveShift.value, [...activeBins].join()].join('|');
-  if (!force && sig === hzSig) return;
-  hzSig = sig;
-  let labels;
-  if (showNotes) {
-    const seen = new Set();
-    labels = Array.from({ length: NUM_BINS }, (_, i) => {
-      if (!activeBins.has(i)) return '';
-      const n = frequencyToNote(binFreq(i));
-      if (snap && seen.has(n)) return '';
-      seen.add(n); return n;
-    });
-  } else if (snap) labels = Array.from({ length: NUM_BINS }, (_, i) => frequencyToNote(binFreq(i)));
-  else labels = Array.from({ length: NUM_BINS }, (_, i) => { const f = binFreq(i); return f.toFixed(f < 100 ? 1 : 0) + 'Hz'; });
-  hzChart.data.labels = labels;
-  hzChart.options.scales.x.ticks.autoSkip = !showNotes;
-}
+wheel.addEventListener('click', (e) => {
+  if (!wheelGeom) return;
+  const rect = wheel.getBoundingClientRect(), x = e.clientX - rect.left - wheelGeom.cx, y = e.clientY - rect.top - wheelGeom.cy;
+  const dist = Math.hypot(x, y);
+  if (dist < wheelGeom.r0 || dist > wheelGeom.R + 24) { selectBin(-1); return; }
+  const bin = wrapBin(Math.floor(((Math.atan2(y, x) * 180 / Math.PI + 90 + 360) % 360) / BIN_DEG));
+  selectBin(bin === selectedBin ? -1 : bin);
+});
 
 /* ---------- wiring ---------- */
 cameraButton.addEventListener('click', () => (isCameraOn ? stopCamera() : startCamera()));
@@ -578,31 +620,23 @@ volumeControl.addEventListener('input', () => {
   $('volumeValue').textContent = Math.round(volumeControl.value * 100);
   if (isSonifying) masterGain.gain.setTargetAtTime(parseFloat(volumeControl.value), sonifyAudioContext.currentTime, 0.05);
 });
-const redrawHz = () => {
+const redrawPitch = () => {
   const lo = wavelengthToAudibleFreq(MAX_NM), hi = wavelengthToAudibleFreq(MIN_NM);
   $('octaveValue').textContent = octaveShift.value;
   $('rangeHint').textContent = 'Red to violet plays at ' + Math.round(lo) + '–' + Math.round(hi) + ' Hz (' + frequencyToNote(lo) + '–' + frequencyToNote(hi) +
     '). In air, those sound waves are ' + (SOUND_MPS / hi).toFixed(2) + '–' + (SOUND_MPS / lo).toFixed(2) + ' m long.';
-  refreshHzLabels(true);
-  hzChart.update('none');
+  drawWheel();
   tuneNoise();
   updateColorNote();
 };
-octaveShift.addEventListener('input', redrawHz);
-noteToggle.addEventListener('change', redrawHz);
-snapToggle.addEventListener('change', redrawHz);
-spreadSelect.addEventListener('change', redrawHz);
+octaveShift.addEventListener('input', redrawPitch);
+noteToggle.addEventListener('change', redrawPitch);
+snapToggle.addEventListener('change', redrawPitch);
+spreadSelect.addEventListener('change', redrawPitch);
 document.addEventListener('visibilitychange', () => { if (document.hidden && isSonifying) stopSonification(); });
 
-try {
-  if (typeof Chart === 'undefined') throw new Error('Chart.js did not load. Check your connection, then reload.');
-  initCharts();
-  redrawHz();
-  requestAnimationFrame(mainLoop);
-} catch (err) {
-  setStatus('The analyzer could not start: ' + (err.message || 'unknown error'));
-  console.error(err);
-}
+redrawPitch();
+requestAnimationFrame(mainLoop);
 })();
 </script>
 </body>

@@ -1,11 +1,11 @@
 # Daily Ditch: Live Audio-Visual Analyzer
 
-A single-page web app at **dailyditch.com**. The camera turns the colors it sees into an estimated light spectrum, and that spectrum can be played as sound.
+A single-page web app at **dailyditch.com**. The camera shows the colors it sees on a color wheel and plays them as sound: each color's light frequency is dropped about 40 octaves into hearing range.
 
 There's no server or build step. The site is plain `index.html`, served by GitHub Pages straight from the `main` branch.
 
 ## Files
-- `index.html`: the whole page (HTML, CSS, JS). It loads Chart.js from jsDelivr.
+- `index.html`: the whole page (HTML, CSS, JS), with no external libraries.
 - `CNAME`: tells GitHub Pages to serve the site at `dailyditch.com`. Don't delete it.
 - `.nojekyll`: serves files as-is, with no Jekyll processing.
 
