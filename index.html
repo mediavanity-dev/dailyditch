@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<title>Live Audio-Visual Analyzer</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.js"></script>
+<style>
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: #0f1115; color: #e9ecf1; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+button, select, input { font: inherit; touch-action: manipulation; }
+:focus-visible { outline: 3px solid #78b7ff; outline-offset: 2px; }
+
+.container { width: min(100% - 20px, 860px); margin: 0 auto; padding: calc(env(safe-area-inset-top) + 10px) 0 calc(96px + env(safe-area-inset-bottom)); }
+.status { margin: 0 0 10px; padding: 10px 12px; border-radius: 10px; background: #1a1d23; color: #b7bfcc; font-size: .9rem; line-height: 1.4; }
+.status:empty { display: none; }
+
+.video-wrap { position: sticky; top: env(safe-area-inset-top); z-index: 5; margin-bottom: 10px; border-radius: 12px; overflow: hidden; background: #000; box-shadow: 0 6px 16px rgba(0,0,0,.5); }
+#video { display: block; width: 100%; height: min(30vh, 260px); object-fit: cover; }
+#video.mirror { transform: scaleX(-1); }
+.flip { position: absolute; right: 8px; bottom: 8px; min-height: 44px; padding: 0 14px; border-radius: 22px; border: 0; background: rgba(0,0,0,.6); color: #fff; }
+
+.card { background: #181b21; border: 1px solid #262b34; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+.card h2 { font-size: .98rem; font-weight: 600; margin: 0 0 8px; }
+.chart-box { position: relative; height: 200px; }
+.mic-grid { display: grid; grid-template-columns: minmax(0,1fr) auto; grid-template-rows: auto 1fr; gap: 4px 8px; }
+.note-row { grid-column: 1; grid-row: 1; position: relative; height: 28px; }
+.mic-canvas { grid-column: 1; grid-row: 2; position: relative; height: 260px; }
+.meter-wrap { grid-column: 2; grid-row: 2; display: flex; }
+.meter { width: 16px; border: 1px solid #333a46; background: #11141a; position: relative; border-radius: 3px; overflow: hidden; }
+#micVolumeLevel { background: #4CAF50; width: 100%; height: 0; position: absolute; bottom: 0; }
+.meter-scale { display: flex; flex-direction: column; justify-content: space-between; font-size: 10px; color: #8791a1; padding-left: 4px; }
+.mic-note-label { position: absolute; top: 0; transform: translateX(-50%); background: #ffd24a; color: #111; padding: 3px 6px; border-radius: 4px; font-size: 12px; font-weight: 600; white-space: nowrap; transition: opacity .25s linear; }
+
+/* Bottom dock: the main controls always sit under the thumb */
+.dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); background: rgba(15,17,21,.94); border-top: 1px solid #262b34; backdrop-filter: blur(8px); }
+.dock button { min-height: 52px; border-radius: 12px; border: 1px solid #333a46; background: #1d2128; color: #e9ecf1; font-size: .92rem; }
+.dock button[aria-pressed="true"] { background: #ffd24a; border-color: #ffd24a; color: #151515; font-weight: 600; }
+.dock button:disabled { opacity: .4; }
+
+/* Settings sheet */
+.sheet { position: fixed; inset: 0; z-index: 100; display: flex; align-items: flex-end; justify-content: center; background: rgba(0,0,0,.55); }
+.sheet-panel { width: min(100%, 560px); max-height: 82vh; overflow-y: auto; background: #181b21; border-radius: 16px 16px 0 0; padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); display: grid; gap: 14px; }
+.sheet-head { display: flex; justify-content: space-between; align-items: center; }
+.sheet-head h2 { margin: 0; font-size: 1.05rem; }
+.sheet-head button { min-height: 44px; padding: 0 16px; border-radius: 10px; border: 1px solid #333a46; background: #1d2128; color: #fff; }
+.field { display: grid; gap: 6px; font-size: .92rem; }
+.field input[type=range] { width: 100%; min-height: 32px; accent-color: #ffd24a; }
+.field select { min-height: 44px; border-radius: 8px; border: 1px solid #333a46; background: #11141a; color: #e9ecf1; padding: 0 10px; }
+.check { display: flex; align-items: center; gap: 12px; min-height: 44px; font-weight: 600; }
+.check input { width: 24px; height: 24px; margin: 0; accent-color: #ffd24a; }
+.hint { font-weight: 400; color: #8791a1; font-size: .82rem; }
+@media (min-width: 700px) { .chart-box { height: 250px; } .mic-canvas { height: 360px; } #video { height: 260px; } }
+@media (prefers-reduced-motion: reduce) { * { transition-duration: .01ms !important; } }
+</style>
+</head>
+<body>
+<main class="container">
+  <p id="statusMessage" class="status" role="status" aria-live="polite">Tap Camera or Mic below to begin. Access needs permission and an HTTPS page (or localhost).</p>
+
+  <section id="cameraCharts" hidden>
+    <div class="video-wrap">
+      <video id="video" autoplay muted playsinline></video>
+      <button id="flipButton" class="flip" type="button">Flip camera</button>
+    </div>
+    <div class="card">
+      <h2>Estimated color distribution</h2>
+      <div class="chart-box"><canvas id="wavelengthHistogram"></canvas></div>
+    </div>
+    <div class="card">
+      <h2>Sonified frequency (gold = playing)</h2>
+      <div class="chart-box"><canvas id="hzHistogram"></canvas></div>
+    </div>
+  </section>
+
+  <section id="micChartContainer" class="card" hidden>
+    <h2>Live audio input</h2>
+    <div class="mic-grid">
+      <div id="micNoteLabels" class="note-row"></div>
+      <div class="mic-canvas"><canvas id="micHistogram"></canvas></div>
+      <div class="meter-wrap">
+        <div class="meter"><div id="micVolumeLevel"></div></div>
+        <div class="meter-scale"><span>-40</span><span>dB</span><span>-100</span></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<nav class="dock" aria-label="Main controls">
+  <button id="cameraButton" type="button" aria-pressed="false">Camera</button>
+  <button id="micButton" type="button" aria-pressed="false">Mic</button>
+  <button id="playButton" type="button" aria-pressed="false" disabled>Play sound</button>
+  <button id="settingsButton" type="button">Settings</button>
+</nav>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-panel" role="dialog" aria-label="Settings">
+    <div class="sheet-head"><h2>Settings</h2><button id="closeSheet" type="button">Done</button></div>
+    <label class="check"><input type="checkbox" id="snapToggle"> <span>Snap tones to chromatic notes<br><span class="hint">Groups colors by nearest note and plays the most common ones.</span></span></label>
+    <label class="check"><input type="checkbox" id="noteToggle"> Show note names on chart</label>
+    <div class="field"><label for="volumeControl">Volume: <span id="volumeValue">70</span>%</label>
+      <input type="range" id="volumeControl" min="0" max="1" value="0.7" step="0.01"></div>
+    <div class="field"><label for="scaleSelect">Pitch style</label>
+      <select id="scaleSelect"><option value="log">True to light</option><option value="exponential">Musical</option><option value="linear">Even steps</option></select>
+      <span id="scaleHint" class="hint"></span></div>
+    <div class="field"><label for="octaveShift">Pitch shift: <span id="octaveValue">0</span> (octaves, negative = lower)</label>
+      <input type="range" id="octaveShift" min="-2" max="2" value="0" step="1"></div>
+    <div class="field"><label for="micGainControl">Mic gain: <span id="micGainValue">1.0x</span></label>
+      <input type="range" id="micGainControl" min="0" max="10" value="1" step="0.1"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+const $ = (id) => document.getElementById(id);
+const video = $('video'), statusMessage = $('statusMessage');
+const cameraButton = $('cameraButton'), micButton = $('micButton'), playButton = $('playButton'), flipButton = $('flipButton');
+const noteToggle = $('noteToggle'), snapToggle = $('snapToggle'), octaveShift = $('octaveShift'), volumeControl = $('volumeControl');
+const scaleSelect = $('scaleSelect'), micGainControl = $('micGainControl'), micNoteLabels = $('micNoteLabels');
+const AudioCtx = window.AudioContext || window.webkitAudioContext;
+const setStatus = (m) => { statusMessage.textContent = m || ''; };
+const press = (btn, on) => btn.setAttribute('aria-pressed', String(on));
+
+const NUM_BINS = 64, MIN_NM = 400, MAX_NM = 700, ANALYSIS_W = 64;
+const MIC_MIN_DB = -100, MIC_MAX_DB = -40;
+// HSV hue (degrees) -> approximate spectral wavelength (nm); far closer to perception than a straight line.
+const HUE_NM = [[0,660],[30,615],[60,580],[120,532],[180,495],[240,465],[270,425]];
+
+let cameraStream, micStream, isCameraOn = false, isMicOn = false, facing = 'user';
+let micGainNode, micAudioContext, micAnalyser, micDataArray;
+let micPoints = [], micBinIdx = [], micLevels = new Float32Array(0);
+let wavelengthChart, hzChart, micChart;
+let smooth = new Float32Array(NUM_BINS), yMax = 10, activeBins = new Set(), hzSig = '';
+let lastCamTime = 0, lastMicTime = 0;
+const micNoteElements = {};
+const videoCanvas = document.createElement('canvas');
+const videoCtx = videoCanvas.getContext('2d', { willReadFrequently: true });
+let sonifyAudioContext, isSonifying = false, activeOscillators = {};
+
+/* ---------- helpers ---------- */
+function topPeaks(arr, n, minVal, radius = 1) {
+  const peaks = [];
+  for (let i = 0; i < arr.length; i++) {
+    const v = arr[i];
+    if (!(v > minVal)) continue;
+    let isMax = true;
+    for (let j = Math.max(0, i - radius); j <= Math.min(arr.length - 1, i + radius); j++) {
+      if (j !== i && (arr[j] > v || (j < i && arr[j] === v))) { isMax = false; break; }
+    }
+    if (isMax) peaks.push({ index: i, value: v });
+  }
+  return peaks.sort((a, b) => b.value - a.value).slice(0, n);
+}
+const binWavelength = (i) => MIN_NM + ((i + 0.5) / NUM_BINS) * (MAX_NM - MIN_NM);
+const freqToMidi = (f) => Math.round(69 + 12 * Math.log2(f / 440));
+const midiToFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
+const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+const midiName = (m) => NOTE_NAMES[((m % 12) + 12) % 12] + (Math.floor(m / 12) - 1);
+const frequencyToNote = (f) => (f > 0 ? midiName(freqToMidi(f)) : '-');
+
+function wavelengthToAudibleFreq(nm) {
+  const octave = parseFloat(octaveShift.value), p = (MAX_NM - nm) / (MAX_NM - MIN_NM); // 0 = red, 1 = violet
+  let f;
+  if (scaleSelect.value === 'linear') f = (200 + p * 1000) * Math.pow(2, octave);
+  else if (scaleSelect.value === 'exponential') f = midiToFreq(48 + p * 48) * Math.pow(2, octave);
+  else f = (299792458 / (nm * 1e-9) / Math.pow(2, 40)) * Math.pow(2, octave); // light shifted down 40 octaves (~390-680 Hz)
+  return Math.min(12000, Math.max(20, f));
+}
+const binFreq = (i) => wavelengthToAudibleFreq(binWavelength(i));
+
+function mediaError(kind, err) {
+  const name = (err && err.name) || 'Error';
+  let why;
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) why = 'Camera and microphone access requires HTTPS or localhost.';
+  else if (name === 'NotAllowedError' || name === 'SecurityError') why = 'Permission was denied. Allow access in your browser or site settings.';
+  else if (name === 'NotFoundError' || name === 'OverconstrainedError') why = 'No compatible ' + kind + ' was found.';
+  else if (name === 'NotReadableError' || name === 'AbortError') why = 'The ' + kind + ' may be in use by another app or tab.';
+  else why = 'The browser reported: ' + ((err && err.message) || name) + '.';
+  setStatus('Could not access the ' + kind + '. ' + why);
+}
+
+/* ---------- main loop ---------- */
+function mainLoop(now) {
+  if (isCameraOn && video.readyState >= 2 && video.videoWidth > 0 && now - lastCamTime > 50) { lastCamTime = now; processVideoFrame(); }
+  if (isMicOn && micAnalyser && now - lastMicTime > 33) { lastMicTime = now; processMicData(); }
+  requestAnimationFrame(mainLoop);
+}
+
+/* ---------- camera analysis ---------- */
+function hueToNm(h) {
+  for (let i = 1; i < HUE_NM.length; i++) {
+    if (h <= HUE_NM[i][0]) {
+      const [h0, n0] = HUE_NM[i - 1], [h1, n1] = HUE_NM[i];
+      return n0 + (n1 - n0) * (h - h0) / (h1 - h0);
+    }
+  }
+  return HUE_NM[HUE_NM.length - 1][1];
+}
+
+function analyzeColors(data) {
+  const hist = new Float32Array(NUM_BINS);
+  let total = 0;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i], g = data[i + 1], b = data[i + 2];
+    const max = Math.max(r, g, b), delta = max - Math.min(r, g, b);
+    if (max < 35) continue;
+    const sat = delta / max;
+    if (sat < 0.18) continue;                       // near-grey pixels carry no usable hue
+    let hue = max === r ? 60 * ((g - b) / delta) : max === g ? 60 * (2 + (b - r) / delta) : 60 * (4 + (r - g) / delta);
+    hue = (hue + 360) % 360;
+    let w = sat * (0.35 + 0.65 * max / 255), nm;
+    if (hue <= 270) nm = hueToNm(hue);
+    else {                                          // purples/magentas have no single wavelength: split to the nearer end, half weight
+      nm = hue < 315 ? HUE_NM[6][1] : HUE_NM[0][1];
+      w *= 0.5;
+    }
+    // Soft binning: share weight between the two nearest bins so the plot is smooth, not spiky.
+    const pos = Math.min(NUM_BINS - 1, Math.max(0, ((nm - MIN_NM) / (MAX_NM - MIN_NM)) * NUM_BINS - 0.5));
+    const i0 = Math.floor(pos), f = pos - i0;
+    hist[i0] += w * (1 - f);
+    if (i0 + 1 < NUM_BINS) hist[i0 + 1] += w * f; else hist[i0] += w * f;
+    total += w;
+  }
+  if (total > 0) for (let i = 0; i < NUM_BINS; i++) hist[i] = 100 * hist[i] / total;
+  return hist;
+}
+
+// Pick what to play: top local peaks, or (snap mode) bins grouped by nearest chromatic note.
+function getTones(h) {
+  const top = Math.max(...h);
+  if (!(top > 0.5)) return [];
+  if (snapToggle.checked) {
+    const byNote = new Map();
+    for (let i = 0; i < NUM_BINS; i++) {
+      if (h[i] <= 0) continue;
+      const m = freqToMidi(binFreq(i));
+      byNote.set(m, (byNote.get(m) || 0) + h[i]);
+    }
+    const list = [...byNote].map(([m, v]) => ({ key: 'n' + m, freq: midiToFreq(m), value: v, midi: m })).sort((a, b) => b.value - a.value);
+    return list.filter((t) => t.value >= list[0].value * 0.2).slice(0, 4);
+  }
+  return topPeaks(h, 4, Math.max(0.8, top * 0.15)).map((p) => ({ key: 'b' + p.index, freq: binFreq(p.index), value: p.value, bin: p.index }));
+}
+
+function processVideoFrame() {
+  const w = ANALYSIS_W, h = Math.max(1, Math.round(w * video.videoHeight / video.videoWidth));
+  if (videoCanvas.width !== w || videoCanvas.height !== h) { videoCanvas.width = w; videoCanvas.height = h; }
+  videoCtx.drawImage(video, 0, 0, w, h);
+  const raw = analyzeColors(videoCtx.getImageData(0, 0, w, h).data);
+  for (let i = 0; i < NUM_BINS; i++) smooth[i] += (raw[i] - smooth[i]) * 0.4;   // temporal smoothing
+
+  const tones = getTones(smooth);
+  activeBins = new Set();
+  if (snapToggle.checked) {
+    const mids = new Set(tones.map((t) => t.midi));
+    for (let i = 0; i < NUM_BINS; i++) if (smooth[i] > 0.05 && mids.has(freqToMidi(binFreq(i)))) activeBins.add(i);
+  } else tones.forEach((t) => activeBins.add(t.bin));
+
+  const peak = Math.max(...smooth);
+  yMax += (Math.max(5, peak * 1.2) - yMax) * 0.2;                            // steady axis, no jitter
+  updateBars(wavelengthChart, null);
+  updateBars(hzChart, activeBins);
+  refreshHzLabels(false);
+  wavelengthChart.update('none');
+  hzChart.update('none');
+  if (isSonifying) updateSonification(tones);
+}
+
+async function openCameraStream() {
+  const next = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: facing }, width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+  const prev = cameraStream;
+  cameraStream = next;
+  video.srcObject = next;
+  const s = next.getVideoTracks()[0]?.getSettings?.() || {};
+  video.classList.toggle('mirror', (s.facingMode || facing) !== 'environment');
+  try { await video.play(); } catch (e) { /* may need another gesture */ }
+  prev?.getTracks().forEach((t) => t.stop());
+}
+
+async function startCamera() {
+  if (isCameraOn) return;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
+    await openCameraStream();
+    $('cameraCharts').hidden = false;
+    playButton.disabled = false;
+    isCameraOn = true;
+    press(cameraButton, true);
+    setStatus('');
+  } catch (err) { mediaError('camera', err); press(cameraButton, false); }
+}
+function stopCamera() {
+  cameraStream?.getTracks().forEach((t) => t.stop());
+  video.srcObject = null;
+  $('cameraCharts').hidden = true;
+  playButton.disabled = true;
+  if (isSonifying) stopSonification();
+  isCameraOn = false;
+  smooth.fill(0);
+  press(cameraButton, false);
+}
+async function flipCamera() {
+  const prev = facing;
+  facing = facing === 'user' ? 'environment' : 'user';
+  try { await openCameraStream(); }
+  catch (err) { facing = prev; setStatus('Could not switch cameras.'); }
+}
+
+/* ---------- microphone ---------- */
+async function startMicrophone() {
+  if (isMicOn) return;
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
+    if (!AudioCtx) throw new Error('AudioContext is not supported by this browser.');
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+    micAudioContext = new AudioCtx();
+    micAudioContext.resume().catch(() => {});
+    const source = micAudioContext.createMediaStreamSource(micStream);
+    micAnalyser = micAudioContext.createAnalyser();
+    micAnalyser.fftSize = 4096;
+    micAnalyser.minDecibels = MIC_MIN_DB;
+    micAnalyser.maxDecibels = MIC_MAX_DB;
+    micAnalyser.smoothingTimeConstant = 0.8;
+    micGainNode = micAudioContext.createGain();
+    micGainNode.gain.value = parseFloat(micGainControl.value);
+    source.connect(micGainNode);
+    micGainNode.connect(micAnalyser);
+    micDataArray = new Float32Array(micAnalyser.frequencyBinCount);
+
+    const nyquist = micAudioContext.sampleRate / 2, n = micAnalyser.frequencyBinCount;
+    micPoints = []; micBinIdx = [];
+    for (let i = 1; i < n; i++) {
+      const f = (i * nyquist) / n;
+      if (f >= 20 && f <= 20000) { micPoints.push({ x: f, y: MIC_MIN_DB }); micBinIdx.push(i); }
+    }
+    micLevels = new Float32Array(micPoints.length);
+
+    $('micChartContainer').hidden = false;
+    if (!micChart) {
+      micChart = new Chart($('micHistogram'), {
+        type: 'line',
+        data: { datasets: [{ data: micPoints, borderColor: '#4CAF50', borderWidth: 1, pointRadius: 0, tension: 0.1 }] },
+        options: {
+          animation: false, responsive: true, maintainAspectRatio: false, parsing: false, normalized: true,
+          plugins: { legend: { display: false }, tooltip: { enabled: false } },
+          scales: {
+            x: { type: 'logarithmic', min: 20, max: 20000, title: { display: true, text: 'Frequency (Hz)' },
+              ticks: { maxRotation: 0, callback: (v) => [20,50,100,200,500,1000,2000,5000,10000,20000].includes(v) ? (v < 1000 ? v : v / 1000 + 'k') : null } },
+            y: { min: MIC_MIN_DB, max: MIC_MAX_DB, title: { display: true, text: 'Amplitude (dB)' } }
+          }
+        }
+      });
+    } else micChart.data.datasets[0].data = micPoints;
+    isMicOn = true;
+    press(micButton, true);
+    if (!isCameraOn) setStatus('');
+  } catch (err) { stopMicrophone(); mediaError('microphone', err); }
+}
+function stopMicrophone() {
+  isMicOn = false;
+  micStream?.getTracks().forEach((t) => t.stop());
+  micGainNode?.disconnect();
+  micAudioContext?.close().catch(() => {});
+  micAnalyser = micDataArray = micStream = micAudioContext = micGainNode = null;
+  $('micChartContainer').hidden = true;
+  $('micVolumeLevel').style.height = '0%';
+  for (const name in micNoteElements) { clearTimeout(micNoteElements[name].timeoutId); micNoteElements[name].element.remove(); delete micNoteElements[name]; }
+  press(micButton, false);
+}
+function processMicData() {
+  if (!micAnalyser || !micChart) return;
+  micAnalyser.getFloatFrequencyData(micDataArray);
+  let peak = MIC_MIN_DB;
+  for (let k = 0; k < micBinIdx.length; k++) {
+    let v = micDataArray[micBinIdx[k]];
+    if (!(v > MIC_MIN_DB)) v = MIC_MIN_DB;
+    micPoints[k].y = v; micLevels[k] = v;
+    if (v > peak) peak = v;
+  }
+  $('micVolumeLevel').style.height = Math.max(0, Math.min(100, ((peak - MIC_MIN_DB) / (MIC_MAX_DB - MIC_MIN_DB)) * 100)) + '%';
+  micChart.update('none');
+  updateMicNoteLabels(topPeaks(micLevels, 4, -85, 4));
+}
+function updateMicNoteLabels(peaks) {
+  const scale = micChart.scales.x;
+  if (!scale) return;
+  const wanted = new Map();
+  for (const p of peaks) { const f = micPoints[p.index].x, name = frequencyToNote(f); if (!wanted.has(name)) wanted.set(name, f); }
+  wanted.forEach((freq, name) => {
+    let info = micNoteElements[name];
+    if (!info) {
+      const el = document.createElement('div');
+      el.className = 'mic-note-label'; el.textContent = name;
+      micNoteLabels.appendChild(el);
+      info = micNoteElements[name] = { element: el, timeoutId: null, fading: false };
+    } else if (info.fading) { clearTimeout(info.timeoutId); info.fading = false; info.element.style.opacity = 1; }
+    info.element.style.left = scale.getPixelForValue(freq) + 'px';
+  });
+  for (const name in micNoteElements) {
+    if (wanted.has(name)) continue;
+    const info = micNoteElements[name];
+    if (info.fading) continue;
+    info.fading = true; info.element.style.opacity = 0;
+    info.timeoutId = setTimeout(() => { info.element.remove(); delete micNoteElements[name]; }, 250);
+  }
+}
+
+/* ---------- sonification ---------- */
+function startSonification() {
+  if (isSonifying) return;
+  if (!AudioCtx) { setStatus('Sound playback is not supported by this browser.'); return; }
+  // iOS: treat output as media playback so the silent switch doesn't mute it.
+  try { if (navigator.audioSession) navigator.audioSession.type = isMicOn ? 'play-and-record' : 'playback'; } catch (e) { /* unsupported */ }
+  sonifyAudioContext = new AudioCtx();
+  sonifyAudioContext.resume().catch(() => {});
+  activeOscillators = {};
+  isSonifying = true;
+  playButton.textContent = 'Stop sound';
+  press(playButton, true);
+}
+function stopSonification() {
+  if (!isSonifying) return;
+  const ctx = sonifyAudioContext, t = ctx.currentTime;
+  for (const key in activeOscillators) {
+    const { gainNode, oscillator } = activeOscillators[key];
+    gainNode.gain.cancelScheduledValues(t);
+    gainNode.gain.setTargetAtTime(0, t, 0.05);
+    try { oscillator.stop(t + 0.3); } catch (e) { /* already stopped */ }
+  }
+  activeOscillators = {};
+  isSonifying = false;
+  playButton.textContent = 'Play sound';
+  press(playButton, false);
+  setTimeout(() => ctx.close().catch(() => {}), 500);
+}
+function updateSonification(tones) {
+  if (sonifyAudioContext.state !== 'running') { sonifyAudioContext.resume().catch(() => {}); return; }
+  const master = parseFloat(volumeControl.value), now = sonifyAudioContext.currentTime, fade = 0.05;
+  const maxV = tones.length ? tones[0].value : 0, current = new Set();
+  const share = 0.7 / Math.sqrt(Math.max(1, tones.length));   // keeps chords from clipping
+  tones.forEach((tone) => {
+    current.add(tone.key);
+    const gain = maxV > 0 ? (tone.value / maxV) * master * share : 0;
+    let entry = activeOscillators[tone.key];
+    if (!entry) {
+      const oscillator = sonifyAudioContext.createOscillator(), gainNode = sonifyAudioContext.createGain();
+      oscillator.type = 'triangle';                              // extra harmonics carry on small phone speakers
+      oscillator.frequency.setValueAtTime(tone.freq, now);
+      gainNode.gain.setValueAtTime(0, now);
+      oscillator.connect(gainNode); gainNode.connect(sonifyAudioContext.destination);
+      oscillator.start();
+      entry = activeOscillators[tone.key] = { oscillator, gainNode };
+    }
+    entry.gainNode.gain.setTargetAtTime(gain, now, fade);
+    entry.oscillator.frequency.setTargetAtTime(tone.freq, now, 0.03);
+  });
+  for (const key in activeOscillators) {
+    if (current.has(key)) continue;
+    const { gainNode, oscillator } = activeOscillators[key];
+    gainNode.gain.cancelScheduledValues(now);
+    gainNode.gain.setTargetAtTime(0, now, fade);
+    try { oscillator.stop(now + fade * 5); } catch (e) { /* ignore */ }
+    delete activeOscillators[key];
+  }
+}
+
+/* ---------- charts ---------- */
+const binColors = Array.from({ length: NUM_BINS }, (_, i) => {
+  // Colour each bar with the hue that actually maps to its wavelength (inverse of hueToNm).
+  const nm = binWavelength(i);
+  let hue = 270;
+  for (let k = 1; k < HUE_NM.length; k++) {
+    if (nm >= HUE_NM[k][1]) { const [h0, n0] = HUE_NM[k - 1], [h1, n1] = HUE_NM[k]; hue = h0 + (h1 - h0) * (nm - n0) / (n1 - n0); break; }
+  }
+  return `hsl(${hue}, 85%, 52%)`;
+});
+
+function makeBarChart(canvas, yTitle) {
+  return new Chart(canvas, {
+    type: 'bar',
+    data: { labels: [], datasets: [{ data: new Array(NUM_BINS).fill(0), backgroundColor: [...binColors], barPercentage: 1, categoryPercentage: 1 }] },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { enabled: false } },
+      scales: {
+        x: { grid: { display: false }, ticks: { autoSkip: true, maxTicksLimit: 8, maxRotation: 0, minRotation: 0 } },
+        y: { min: 0, max: 10, ticks: { maxTicksLimit: 5, callback: (v) => v + '%' }, title: { display: true, text: yTitle } }
+      }
+    }
+  });
+}
+function initCharts() {
+  Chart.defaults.font.size = 11;
+  Chart.defaults.color = '#9aa3b2';
+  Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
+  wavelengthChart = makeBarChart($('wavelengthHistogram'), 'Share of colorful pixels');
+  hzChart = makeBarChart($('hzHistogram'), 'Share of colorful pixels');
+  wavelengthChart.data.labels = Array.from({ length: NUM_BINS }, (_, i) => Math.round(binWavelength(i)) + 'nm');
+  refreshHzLabels(true);
+}
+function updateBars(chart, active) {
+  chart.data.datasets[0].data = Array.from(smooth);
+  chart.options.scales.y.max = yMax;
+  if (active) chart.data.datasets[0].backgroundColor = binColors.map((c, i) => (active.has(i) ? '#ffd24a' : c));
+}
+function refreshHzLabels(force) {
+  const showNotes = noteToggle.checked, snap = snapToggle.checked;
+  const sig = [showNotes, snap, scaleSelect.value, octaveShift.value, [...activeBins].join()].join('|');
+  if (!force && sig === hzSig) return;
+  hzSig = sig;
+  let labels;
+  if (showNotes) {
+    const seen = new Set();
+    labels = Array.from({ length: NUM_BINS }, (_, i) => {
+      if (!activeBins.has(i)) return '';
+      const n = frequencyToNote(binFreq(i));
+      if (snap && seen.has(n)) return '';
+      seen.add(n); return n;
+    });
+  } else if (snap) labels = Array.from({ length: NUM_BINS }, (_, i) => frequencyToNote(binFreq(i)));
+  else labels = Array.from({ length: NUM_BINS }, (_, i) => { const f = binFreq(i); return f.toFixed(f < 100 ? 1 : 0) + 'Hz'; });
+  hzChart.data.labels = labels;
+  hzChart.options.scales.x.ticks.autoSkip = !showNotes;
+}
+
+/* ---------- wiring ---------- */
+cameraButton.addEventListener('click', () => (isCameraOn ? stopCamera() : startCamera()));
+micButton.addEventListener('click', () => (isMicOn ? stopMicrophone() : startMicrophone()));
+playButton.addEventListener('click', () => (isSonifying ? stopSonification() : startSonification()));
+flipButton.addEventListener('click', flipCamera);
+$('settingsButton').addEventListener('click', () => { $('sheet').hidden = false; $('closeSheet').focus(); });
+const closeSheet = () => { $('sheet').hidden = true; $('settingsButton').focus(); };
+$('closeSheet').addEventListener('click', closeSheet);
+$('sheet').addEventListener('click', (e) => { if (e.target === $('sheet')) closeSheet(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !$('sheet').hidden) closeSheet(); });
+
+volumeControl.addEventListener('input', () => { $('volumeValue').textContent = Math.round(volumeControl.value * 100); });
+const SCALE_HINTS = {
+  log: 'Uses the real physics of color, shifted down into hearing range. Red is lowest, violet highest.',
+  exponential: 'Spreads the colors evenly across four octaves of notes, so every step sounds equally big. Red is lowest, violet highest.',
+  linear: 'Pitch rises at a constant rate from red to violet. Simple, but low colors sound more spread out than high ones.'
+};
+const redrawHz = () => { $('scaleHint').textContent = SCALE_HINTS[scaleSelect.value]; $('octaveValue').textContent = octaveShift.value; refreshHzLabels(true); hzChart.update('none'); };
+octaveShift.addEventListener('input', redrawHz);
+noteToggle.addEventListener('change', redrawHz);
+snapToggle.addEventListener('change', redrawHz);
+scaleSelect.addEventListener('change', redrawHz);
+micGainControl.addEventListener('input', () => {
+  const g = parseFloat(micGainControl.value);
+  if (micGainNode && micAudioContext) micGainNode.gain.setTargetAtTime(g, micAudioContext.currentTime, 0.01);
+  $('micGainValue').textContent = g.toFixed(1) + 'x';
+});
+document.addEventListener('visibilitychange', () => { if (document.hidden && isSonifying) stopSonification(); });
+
+try {
+  if (typeof Chart === 'undefined') throw new Error('Chart.js did not load. Check your connection, then reload.');
+  initCharts();
+  redrawHz();
+  requestAnimationFrame(mainLoop);
+} catch (err) {
+  setStatus('The analyzer could not start: ' + (err.message || 'unknown error'));
+  console.error(err);
+}
+})();
+</script>
+</body>
+</html>
