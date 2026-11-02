@@ -29,17 +29,9 @@ button, select, input { font: inherit; touch-action: manipulation; }
 .chart-box { position: relative; height: 200px; }
 .chart-box canvas { cursor: pointer; }
 .chart-note { margin: -2px 0 8px; min-height: 1.3em; white-space: pre-line; color: #8791a1; font-size: .82rem; line-height: 1.4; }
-.mic-grid { display: grid; grid-template-columns: minmax(0,1fr) auto; grid-template-rows: auto 1fr; gap: 4px 8px; }
-.note-row { grid-column: 1; grid-row: 1; position: relative; height: 28px; }
-.mic-canvas { grid-column: 1; grid-row: 2; position: relative; height: 260px; }
-.meter-wrap { grid-column: 2; grid-row: 2; display: flex; }
-.meter { width: 16px; border: 1px solid #333a46; background: #11141a; position: relative; border-radius: 3px; overflow: hidden; }
-#micVolumeLevel { background: #4CAF50; width: 100%; height: 0; position: absolute; bottom: 0; }
-.meter-scale { display: flex; flex-direction: column; justify-content: space-between; font-size: 10px; color: #8791a1; padding-left: 4px; }
-.mic-note-label { position: absolute; top: 0; transform: translateX(-50%); background: #ffd24a; color: #111; padding: 3px 6px; border-radius: 4px; font-size: 12px; font-weight: 600; white-space: nowrap; transition: opacity .25s linear; }
 
 /* Bottom dock: the main controls always sit under the thumb */
-.dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); background: rgba(15,17,21,.94); border-top: 1px solid #262b34; backdrop-filter: blur(8px); }
+.dock { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); background: rgba(15,17,21,.94); border-top: 1px solid #262b34; backdrop-filter: blur(8px); }
 .dock button { min-height: 52px; border-radius: 12px; border: 1px solid #333a46; background: #1d2128; color: #e9ecf1; font-size: .92rem; }
 .dock button[aria-pressed="true"] { background: #ffd24a; border-color: #ffd24a; color: #151515; font-weight: 600; }
 .dock button:disabled { opacity: .4; }
@@ -56,13 +48,13 @@ button, select, input { font: inherit; touch-action: manipulation; }
 .check { display: flex; align-items: center; gap: 12px; min-height: 44px; font-weight: 600; }
 .check input { width: 24px; height: 24px; margin: 0; accent-color: #ffd24a; }
 .hint { font-weight: 400; color: #8791a1; font-size: .82rem; }
-@media (min-width: 700px) { .chart-box { height: 250px; } .mic-canvas { height: 360px; } #video { height: 260px; } }
+@media (min-width: 700px) { .chart-box { height: 250px; } #video { height: 260px; } }
 @media (prefers-reduced-motion: reduce) { * { transition-duration: .01ms !important; } }
 </style>
 </head>
 <body>
 <main class="container">
-  <p id="statusMessage" class="status" role="status" aria-live="polite">Tap Camera or Mic below to begin. Access needs permission and an HTTPS page (or localhost).</p>
+  <p id="statusMessage" class="status" role="status" aria-live="polite">Tap Camera below to begin. Camera access needs permission and an HTTPS page (or localhost).</p>
 
   <section id="cameraCharts" hidden>
     <div class="video-wrap">
@@ -80,23 +72,10 @@ button, select, input { font: inherit; touch-action: manipulation; }
       <div class="chart-box"><canvas id="hzHistogram"></canvas></div>
     </div>
   </section>
-
-  <section id="micChartContainer" class="card" hidden>
-    <h2>Live audio input</h2>
-    <div class="mic-grid">
-      <div id="micNoteLabels" class="note-row"></div>
-      <div class="mic-canvas"><canvas id="micHistogram"></canvas></div>
-      <div class="meter-wrap">
-        <div class="meter"><div id="micVolumeLevel"></div></div>
-        <div class="meter-scale"><span>-40</span><span>dB</span><span>-100</span></div>
-      </div>
-    </div>
-  </section>
 </main>
 
 <nav class="dock" aria-label="Main controls">
   <button id="cameraButton" type="button" aria-pressed="false">Camera</button>
-  <button id="micButton" type="button" aria-pressed="false">Mic</button>
   <button id="playButton" type="button" aria-pressed="false" disabled>Play sound</button>
   <button id="settingsButton" type="button">Settings</button>
 </nav>
@@ -116,11 +95,11 @@ button, select, input { font: inherit; touch-action: manipulation; }
       <select id="toneSelect"><option value="sine">Pure (sine wave, like a single wavelength of light)</option><option value="triangle">Bright (carries better on phone speakers)</option></select></div>
     <div class="field"><label for="playMode">What plays</label>
       <select id="playMode"><option value="peaks">Main colors (up to 4 tones)</option><option value="spectrum">Full spectrum (every color present)</option></select></div>
-    <label class="check"><input type="checkbox" id="noiseToggle"> <span>Play white and grey as noise<br><span class="hint">White light contains every color at once, so it plays as a soft band of noise across the color range.</span></span></label>
+    <div class="field"><label for="whiteMode">White and grey play as</label>
+      <select id="whiteMode"><option value="chord">Soft chord (red + green + blue)</option><option value="noise">Noise across the color range</option><option value="off">Silence</option></select>
+      <span class="hint">White light is every color at once. Its sound gets louder with how much white is in view, and black (no light) is always silent.</span></div>
     <label class="check"><input type="checkbox" id="snapToggle"> <span>Snap tones to chromatic notes<br><span class="hint">Groups colors by their nearest musical note.</span></span></label>
     <label class="check"><input type="checkbox" id="noteToggle"> Show note names on chart</label>
-    <div class="field"><label for="micGainControl">Mic gain: <span id="micGainValue">1.0x</span></label>
-      <input type="range" id="micGainControl" min="0" max="10" value="1" step="0.1"></div>
   </div>
 </div>
 
@@ -129,34 +108,30 @@ button, select, input { font: inherit; touch-action: manipulation; }
 'use strict';
 const $ = (id) => document.getElementById(id);
 const video = $('video'), statusMessage = $('statusMessage');
-const cameraButton = $('cameraButton'), micButton = $('micButton'), playButton = $('playButton'), flipButton = $('flipButton');
+const cameraButton = $('cameraButton'), playButton = $('playButton'), flipButton = $('flipButton');
 const noteToggle = $('noteToggle'), snapToggle = $('snapToggle'), octaveShift = $('octaveShift'), volumeControl = $('volumeControl');
-const spreadSelect = $('spreadSelect'), toneSelect = $('toneSelect'), playMode = $('playMode'), noiseToggle = $('noiseToggle');
-const micGainControl = $('micGainControl'), micNoteLabels = $('micNoteLabels');
+const spreadSelect = $('spreadSelect'), toneSelect = $('toneSelect'), playMode = $('playMode'), whiteMode = $('whiteMode');
 const AudioCtx = window.AudioContext || window.webkitAudioContext;
 const setStatus = (m) => { statusMessage.textContent = m || ''; };
 const press = (btn, on) => btn.setAttribute('aria-pressed', String(on));
 
 // The hue table below only reaches 425-660 nm, so the axis is fitted to that span.
 const NUM_BINS = 64, MIN_NM = 420, MAX_NM = 665, ANALYSIS_W = 96;
-const MIC_MIN_DB = -100, MIC_MAX_DB = -40;
+const MIN_CHROMA = 24;   // channel spread (0-255) below which a pixel's hue is mostly camera noise
 // HSV hue (degrees) -> approximate spectral wavelength (nm); far closer to perception than a straight line.
 const HUE_NM = [[0,660],[30,615],[60,580],[120,532],[180,495],[240,465],[270,425]];
 
-let cameraStream, micStream, isCameraOn = false, isMicOn = false, facing = 'user';
-let micGainNode, micAudioContext, micAnalyser, micDataArray;
-let micPoints = [], micBinIdx = [], micLevels = new Float32Array(0);
-let wavelengthChart, hzChart, micChart;
+let cameraStream, isCameraOn = false, facing = 'user';
+let wavelengthChart, hzChart;
 let smooth = new Float32Array(NUM_BINS), yMax = 10, activeBins = new Set(), hzSig = '';
-let lastCamTime = 0, lastMicTime = 0;
-const micNoteElements = {};
+let lastCamTime = 0;
 const videoCanvas = document.createElement('canvas');
 const videoCtx = videoCanvas.getContext('2d', { willReadFrequently: true });
 const overlay = $('videoOverlay'), overlayCtx = overlay.getContext('2d'), colorNote = $('colorNote');
 const maskCanvas = document.createElement('canvas'), maskCtx = maskCanvas.getContext('2d');
-let pixelBin = new Int16Array(0), skippedShare = 0, selectedBin = -1;
+let pixelBin = new Int16Array(0), selectedBin = -1;
 const binRGB = new Float32Array(NUM_BINS * 3), hasRGB = new Uint8Array(NUM_BINS); // smoothed average real colour per bin
-let colorLevel = 0, greyLevel = 0;   // smoothed scene loudness for colours and for white/grey
+let colorLevel = 0, whiteLevel = 0, blackLevel = 0;   // smoothed scene make-up; colorLevel also sets colour loudness
 let sonifyAudioContext, isSonifying = false, voices = {}, peakFreqs = [0, 0, 0, 0];
 let masterGain, noiseGain, noiseFilters = [], noiseBoost = 1;
 
@@ -195,7 +170,7 @@ const binFreq = (i) => wavelengthToAudibleFreq(binWavelength(i));
 function mediaError(kind, err) {
   const name = (err && err.name) || 'Error';
   let why;
-  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) why = 'Camera and microphone access requires HTTPS or localhost.';
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) why = 'Camera access requires HTTPS or localhost.';
   else if (name === 'NotAllowedError' || name === 'SecurityError') why = 'Permission was denied. Allow access in your browser or site settings.';
   else if (name === 'NotFoundError' || name === 'OverconstrainedError') why = 'No compatible ' + kind + ' was found.';
   else if (name === 'NotReadableError' || name === 'AbortError') why = 'The ' + kind + ' may be in use by another app or tab.';
@@ -206,7 +181,6 @@ function mediaError(kind, err) {
 /* ---------- main loop ---------- */
 function mainLoop(now) {
   if (isCameraOn && video.readyState >= 2 && video.videoWidth > 0 && now - lastCamTime > 50) { lastCamTime = now; processVideoFrame(); }
-  if (isMicOn && micAnalyser && now - lastMicTime > 33) { lastMicTime = now; processMicData(); }
   requestAnimationFrame(mainLoop);
 }
 
@@ -221,26 +195,25 @@ function hueToNm(h) {
   return HUE_NM[HUE_NM.length - 1][1];
 }
 
-// Returns the normalised histogram, the average pixel colour per bin, the share of pixels skipped,
-// how vivid the scene is (mean colour weight, 0-1) and how much lit white/grey it holds (mean brightness, 0-1).
-// Also records each pixel's nearest bin in pixelBin (-1 = skipped) for the camera highlight.
+// Each pixel splits into colour + white + black, as in the HWB model: max - min is coloured light (chroma),
+// min is light shared equally by R, G and B (white), and 255 - max is missing light (black).
+// Only chroma goes on the wavelength axis, so dim or washed-out pixels no longer pile up as false orange.
+// Returns the normalised histogram, the average pixel colour per bin, mean chroma (vivid) and mean white and black (0-1).
+// Also records each pixel's nearest bin in pixelBin (-1 = no reliable hue) for the camera highlight.
 function analyzeColors(data) {
   const hist = new Float32Array(NUM_BINS), rgb = new Float32Array(NUM_BINS * 3), n = data.length / 4;
   if (pixelBin.length !== n) pixelBin = new Int16Array(n);
-  let total = 0, skipped = 0, grey = 0;
+  let total = 0, white = 0, black = 0;
   const add = (bin, w, r, g, b) => { hist[bin] += w; rgb[bin * 3] += w * r; rgb[bin * 3 + 1] += w * g; rgb[bin * 3 + 2] += w * b; };
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
     const r = data[i], g = data[i + 1], b = data[i + 2];
-    const max = Math.max(r, g, b), delta = max - Math.min(r, g, b);
-    const sat = max ? delta / max : 0;
-    if (max < 35 || sat < 0.18) {                   // dark or near-grey pixels carry no usable hue
-      pixelBin[p] = -1; skipped++;
-      if (max >= 35) grey += max / 255;
-      continue;
-    }
+    const max = Math.max(r, g, b), min = Math.min(r, g, b), delta = max - min;
+    black += 1 - max / 255;
+    if (delta < MIN_CHROMA) { white += max / 255; pixelBin[p] = -1; continue; }   // too little colour for a reliable hue: count it as grey
+    white += min / 255;
     let hue = max === r ? 60 * ((g - b) / delta) : max === g ? 60 * (2 + (b - r) / delta) : 60 * (4 + (r - g) / delta);
     hue = (hue + 360) % 360;
-    let w = sat * (0.35 + 0.65 * max / 255), nm;
+    let w = (delta - MIN_CHROMA) / (255 - MIN_CHROMA), nm;   // chroma above the noise floor: how much coloured light the pixel carries
     if (hue <= 270) nm = hueToNm(hue);
     else {                                          // purples/magentas have no single wavelength: split to the nearer end, half weight
       nm = hue < 315 ? HUE_NM[6][1] : HUE_NM[0][1];
@@ -258,7 +231,7 @@ function analyzeColors(data) {
     if (hist[i] > 0) for (let c = 0; c < 3; c++) rgb[i * 3 + c] /= hist[i];
     if (total > 0) hist[i] = 100 * hist[i] / total;
   }
-  return { hist, rgb, skipped: n ? skipped / n : 0, vivid: n ? total / n : 0, grey: n ? grey / n : 0 };
+  return { hist, rgb, vivid: n ? total / n : 0, white: n ? white / n : 0, black: n ? black / n : 0 };
 }
 
 // Pick what to play. Main colors: up to 4 peaks (or most common notes when snapping).
@@ -312,9 +285,10 @@ function processVideoFrame() {
   const w = ANALYSIS_W, h = Math.max(1, Math.round(w * eh / ew));
   if (videoCanvas.width !== w || videoCanvas.height !== h) { videoCanvas.width = w; videoCanvas.height = h; }
   videoCtx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, w, h);
-  const { hist: raw, rgb, skipped, vivid, grey } = analyzeColors(videoCtx.getImageData(0, 0, w, h).data);
+  const { hist: raw, rgb, vivid, white, black } = analyzeColors(videoCtx.getImageData(0, 0, w, h).data);
   colorLevel += (Math.min(1, Math.sqrt(vivid * 3)) - colorLevel) * 0.3;      // loudness follows how colourful the view is
-  greyLevel += (grey - greyLevel) * 0.3;
+  whiteLevel += (white - whiteLevel) * 0.3;
+  blackLevel += (black - blackLevel) * 0.3;
   for (let i = 0; i < NUM_BINS; i++) {
     smooth[i] += (raw[i] - smooth[i]) * 0.4;                                   // temporal smoothing
     if (raw[i] > 0.3) {
@@ -323,7 +297,6 @@ function processVideoFrame() {
       hasRGB[i] = 1;
     }
   }
-  skippedShare += (skipped - skippedShare) * 0.2;
   drawHighlight(w, h);
   updateColorNote();
 
@@ -336,7 +309,7 @@ function processVideoFrame() {
   } else tones.forEach((t) => activeBins.add(t.bin));
 
   const peak = Math.max(...smooth);
-  yMax += (Math.max(5, peak * 1.2) - yMax) * 0.2;                            // steady axis, no jitter
+  yMax += (Math.min(100, Math.max(5, peak * 1.2)) - yMax) * 0.2;                            // steady axis, no jitter
   updateBars(wavelengthChart, null);
   updateBars(hzChart, activeBins);
   refreshHzLabels(false);
@@ -368,7 +341,8 @@ function conversionChain(nm) {
     (SOUND_MPS / f).toFixed(2) + ' m sound wave' + (spread === '1' ? '' : ' (' + spread + '× spread)');
 }
 function updateColorNote() {
-  const msg = 'Not counted: ' + Math.round(skippedShare * 100) + '% grey, white or dark. ' +
+  const c = Math.max(0, 1 - whiteLevel - blackLevel), pct = (v) => Math.round(v * 100) + '%';
+  const msg = 'Scene: ' + pct(c) + ' color · ' + pct(whiteLevel) + ' white · ' + pct(blackLevel) + ' black. ' +
     (selectedBin < 0 ? 'Tap a bar to highlight those colors on the camera.' : 'Tap the bar again to clear.\n' + conversionChain(binWavelength(selectedBin)));
   if (colorNote.textContent !== msg) colorNote.textContent = msg;
 }
@@ -412,7 +386,7 @@ function stopCamera() {
   isCameraOn = false;
   smooth.fill(0);
   hasRGB.fill(0);
-  skippedShare = 0;
+  whiteLevel = blackLevel = 0;
   selectedBin = -1;
   overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
   press(cameraButton, false);
@@ -424,111 +398,12 @@ async function flipCamera() {
   catch (err) { facing = prev; setStatus('Could not switch cameras.'); }
 }
 
-/* ---------- microphone ---------- */
-async function startMicrophone() {
-  if (isMicOn) return;
-  try {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('unsupported');
-    if (!AudioCtx) throw new Error('AudioContext is not supported by this browser.');
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-    micAudioContext = new AudioCtx();
-    micAudioContext.resume().catch(() => {});
-    const source = micAudioContext.createMediaStreamSource(micStream);
-    micAnalyser = micAudioContext.createAnalyser();
-    micAnalyser.fftSize = 4096;
-    micAnalyser.minDecibels = MIC_MIN_DB;
-    micAnalyser.maxDecibels = MIC_MAX_DB;
-    micAnalyser.smoothingTimeConstant = 0.8;
-    micGainNode = micAudioContext.createGain();
-    micGainNode.gain.value = parseFloat(micGainControl.value);
-    source.connect(micGainNode);
-    micGainNode.connect(micAnalyser);
-    micDataArray = new Float32Array(micAnalyser.frequencyBinCount);
-
-    const nyquist = micAudioContext.sampleRate / 2, n = micAnalyser.frequencyBinCount;
-    micPoints = []; micBinIdx = [];
-    for (let i = 1; i < n; i++) {
-      const f = (i * nyquist) / n;
-      if (f >= 20 && f <= 20000) { micPoints.push({ x: f, y: MIC_MIN_DB }); micBinIdx.push(i); }
-    }
-    micLevels = new Float32Array(micPoints.length);
-
-    $('micChartContainer').hidden = false;
-    if (!micChart) {
-      micChart = new Chart($('micHistogram'), {
-        type: 'line',
-        data: { datasets: [{ data: micPoints, borderColor: '#4CAF50', borderWidth: 1, pointRadius: 0, tension: 0.1 }] },
-        options: {
-          animation: false, responsive: true, maintainAspectRatio: false, parsing: false, normalized: true,
-          plugins: { legend: { display: false }, tooltip: { enabled: false } },
-          scales: {
-            x: { type: 'logarithmic', min: 20, max: 20000, title: { display: true, text: 'Frequency (Hz)' },
-              ticks: { maxRotation: 0, callback: (v) => [20,50,100,200,500,1000,2000,5000,10000,20000].includes(v) ? (v < 1000 ? v : v / 1000 + 'k') : null } },
-            y: { min: MIC_MIN_DB, max: MIC_MAX_DB, title: { display: true, text: 'Amplitude (dB)' } }
-          }
-        }
-      });
-    } else micChart.data.datasets[0].data = micPoints;
-    isMicOn = true;
-    press(micButton, true);
-    if (!isCameraOn) setStatus('');
-  } catch (err) { stopMicrophone(); mediaError('microphone', err); }
-}
-function stopMicrophone() {
-  isMicOn = false;
-  micStream?.getTracks().forEach((t) => t.stop());
-  micGainNode?.disconnect();
-  micAudioContext?.close().catch(() => {});
-  micAnalyser = micDataArray = micStream = micAudioContext = micGainNode = null;
-  $('micChartContainer').hidden = true;
-  $('micVolumeLevel').style.height = '0%';
-  for (const name in micNoteElements) { clearTimeout(micNoteElements[name].timeoutId); micNoteElements[name].element.remove(); delete micNoteElements[name]; }
-  press(micButton, false);
-}
-function processMicData() {
-  if (!micAnalyser || !micChart) return;
-  micAnalyser.getFloatFrequencyData(micDataArray);
-  let peak = MIC_MIN_DB;
-  for (let k = 0; k < micBinIdx.length; k++) {
-    let v = micDataArray[micBinIdx[k]];
-    if (!(v > MIC_MIN_DB)) v = MIC_MIN_DB;
-    micPoints[k].y = v; micLevels[k] = v;
-    if (v > peak) peak = v;
-  }
-  $('micVolumeLevel').style.height = Math.max(0, Math.min(100, ((peak - MIC_MIN_DB) / (MIC_MAX_DB - MIC_MIN_DB)) * 100)) + '%';
-  micChart.update('none');
-  updateMicNoteLabels(topPeaks(micLevels, 4, -85, 4));
-}
-function updateMicNoteLabels(peaks) {
-  const scale = micChart.scales.x;
-  if (!scale) return;
-  const wanted = new Map();
-  for (const p of peaks) { const f = micPoints[p.index].x, name = frequencyToNote(f); if (!wanted.has(name)) wanted.set(name, f); }
-  wanted.forEach((freq, name) => {
-    let info = micNoteElements[name];
-    if (!info) {
-      const el = document.createElement('div');
-      el.className = 'mic-note-label'; el.textContent = name;
-      micNoteLabels.appendChild(el);
-      info = micNoteElements[name] = { element: el, timeoutId: null, fading: false };
-    } else if (info.fading) { clearTimeout(info.timeoutId); info.fading = false; info.element.style.opacity = 1; }
-    info.element.style.left = scale.getPixelForValue(freq) + 'px';
-  });
-  for (const name in micNoteElements) {
-    if (wanted.has(name)) continue;
-    const info = micNoteElements[name];
-    if (info.fading) continue;
-    info.fading = true; info.element.style.opacity = 0;
-    info.timeoutId = setTimeout(() => { info.element.remove(); delete micNoteElements[name]; }, 250);
-  }
-}
-
 /* ---------- sonification ---------- */
 function startSonification() {
   if (isSonifying) return;
   if (!AudioCtx) { setStatus('Sound playback is not supported by this browser.'); return; }
   // iOS: treat output as media playback so the silent switch doesn't mute it.
-  try { if (navigator.audioSession) navigator.audioSession.type = isMicOn ? 'play-and-record' : 'playback'; } catch (e) { /* unsupported */ }
+  try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { /* unsupported */ }
   const ctx = sonifyAudioContext = new AudioCtx();
   ctx.resume().catch(() => {});
   // Signal chain: voices + noise -> master volume -> limiter (so chords never clip) -> speakers.
@@ -538,7 +413,7 @@ function startSonification() {
   limiter.threshold.value = -10; limiter.knee.value = 6; limiter.ratio.value = 12;
   limiter.attack.value = 0.003; limiter.release.value = 0.25;
   masterGain.connect(limiter); limiter.connect(ctx.destination);
-  // White light holds every wavelength, so white/grey plays as noise band-limited to the colour range.
+  // "Noise" white mode: white light holds every wavelength, so it plays as noise band-limited to the colour range.
   const buf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate), d = buf.getChannelData(0);
   for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
   const noise = ctx.createBufferSource();
@@ -574,14 +449,24 @@ function tuneNoise() {
   noiseFilters.forEach((f) => { f.frequency.setTargetAtTime(fc, t, 0.05); f.Q.setTargetAtTime(fc / (hi - lo), t, 0.05); });
   noiseBoost = Math.min(8, 0.5 * Math.sqrt(sonifyAudioContext.sampleRate / 2 / (hi - lo)));   // narrow bands pass less energy
 }
+// "Chord" white mode: white light is red + green + blue light added together, so it plays as those three tones.
+const WHITE_NM = [hueToNm(0), hueToNm(120), hueToNm(240)];
+function whiteChord() {
+  if (whiteMode.value !== 'chord' || whiteLevel < 0.02) return [];
+  const gain = 0.2 * Math.sqrt(whiteLevel / 3);
+  return WHITE_NM.map((nm, k) => {
+    const f = wavelengthToAudibleFreq(nm);
+    return { key: 'w' + k, freq: snapToggle.checked ? midiToFreq(freqToMidi(f)) : f, gain };
+  });
+}
 function updateSonification(tones) {
   const ctx = sonifyAudioContext;
   if (ctx.state !== 'running') { ctx.resume().catch(() => {}); return; }
   const now = ctx.currentTime, type = toneSelect.value, current = new Set();
-  tones.forEach((tone) => {
+  tones.concat(whiteChord()).forEach((tone) => {
     current.add(tone.key);
     // Amplitude ~ sqrt(share) keeps each colour's power proportional to how much of the view it covers.
-    const gain = 0.45 * colorLevel * Math.sqrt(tone.value / 100);
+    const gain = tone.gain ?? 0.45 * colorLevel * Math.sqrt(tone.value / 100);
     let v = voices[tone.key];
     if (!v) {
       const osc = ctx.createOscillator(), amp = ctx.createGain();
@@ -603,7 +488,7 @@ function updateSonification(tones) {
     if (!v.silent) { v.amp.gain.setTargetAtTime(0, now, 0.05); v.silent = true; }
     else if (now - v.lastOn > 2) { try { v.osc.stop(); } catch (e) { /* already stopped */ } v.amp.disconnect(); delete voices[key]; }
   }
-  noiseGain.gain.setTargetAtTime(noiseToggle.checked ? 0.3 * noiseBoost * Math.sqrt(greyLevel) : 0, now, 0.08);
+  noiseGain.gain.setTargetAtTime(whiteMode.value === 'noise' ? 0.3 * noiseBoost * Math.sqrt(whiteLevel) : 0, now, 0.08);
 }
 
 /* ---------- charts ---------- */
@@ -646,8 +531,8 @@ function initCharts() {
   Chart.defaults.font.size = 11;
   Chart.defaults.color = '#9aa3b2';
   Chart.defaults.borderColor = 'rgba(255,255,255,.08)';
-  wavelengthChart = makeBarChart($('wavelengthHistogram'), 'Share of colorful pixels');
-  hzChart = makeBarChart($('hzHistogram'), 'Share of colorful pixels');
+  wavelengthChart = makeBarChart($('wavelengthHistogram'), 'Share of color');
+  hzChart = makeBarChart($('hzHistogram'), 'Share of color');
   wavelengthChart.data.labels = Array.from({ length: NUM_BINS }, (_, i) => Math.round(binWavelength(i)) + 'nm');
   refreshHzLabels(true);
 }
@@ -681,7 +566,6 @@ function refreshHzLabels(force) {
 
 /* ---------- wiring ---------- */
 cameraButton.addEventListener('click', () => (isCameraOn ? stopCamera() : startCamera()));
-micButton.addEventListener('click', () => (isMicOn ? stopMicrophone() : startMicrophone()));
 playButton.addEventListener('click', () => (isSonifying ? stopSonification() : startSonification()));
 flipButton.addEventListener('click', flipCamera);
 $('settingsButton').addEventListener('click', () => { $('sheet').hidden = false; $('closeSheet').focus(); });
@@ -708,11 +592,6 @@ octaveShift.addEventListener('input', redrawHz);
 noteToggle.addEventListener('change', redrawHz);
 snapToggle.addEventListener('change', redrawHz);
 spreadSelect.addEventListener('change', redrawHz);
-micGainControl.addEventListener('input', () => {
-  const g = parseFloat(micGainControl.value);
-  if (micGainNode && micAudioContext) micGainNode.gain.setTargetAtTime(g, micAudioContext.currentTime, 0.01);
-  $('micGainValue').textContent = g.toFixed(1) + 'x';
-});
 document.addEventListener('visibilitychange', () => { if (document.hidden && isSonifying) stopSonification(); });
 
 try {

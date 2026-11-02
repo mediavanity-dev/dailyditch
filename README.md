@@ -1,6 +1,6 @@
 # Daily Ditch: Live Audio-Visual Analyzer
 
-A single-page web app at **dailyditch.com**. The camera turns the colors it sees into an estimated light spectrum, and that spectrum can be played as sound. The mic shows a live frequency spectrum with note names.
+A single-page web app at **dailyditch.com**. The camera turns the colors it sees into an estimated light spectrum, and that spectrum can be played as sound.
 
 There's no server or build step. The site is plain `index.html`, served by GitHub Pages straight from the `main` branch.
 
@@ -13,7 +13,7 @@ There's no server or build step. The site is plain `index.html`, served by GitHu
 Edit `index.html`, then commit and push to `main`. The change goes live in about a minute.
 
 ## Running locally
-Camera and mic need HTTPS or localhost, so serve the folder instead of opening the file:
+The camera needs HTTPS or localhost, so serve the folder instead of opening the file:
 
 ```
 npx serve .
